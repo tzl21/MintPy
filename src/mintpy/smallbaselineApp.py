@@ -958,6 +958,33 @@ class TimeSeriesAnalysis:
             elif sname == 'hdfeos5':
                 self.run_save2hdfeos5(sname)
 
+    def write_plotshell(self,iargs_list):
+        """
+        if plot_result not work successfully, run sh plot.sh under linux terminal instead
+        """
+        if iargs_list==None:
+            return
+
+        plot_shell = os.path.join(self.workDir, 'plot.sh')
+
+        from pathlib import Path
+        file_path = Path(plot_shell)
+
+        if file_path.exists():
+            print('plot.sh already exists, skip write plot.sh.')
+            return
+
+        with open(plot_shell, 'w') as file:
+            file.write('#!/bin/bashnn\n')
+            file.write('rm -r ./pic/*.png\n')
+            for iargs in iargs_list:
+                iargs = 'view.py'+' '+(' '.join(iargs))
+                file.write(iargs)
+                file.write('\n')
+            file.write('cp *txt ./pic\n')
+            file.write('mv *png *kmz *pdf ./pic')
+        file.close()
+        print(f"Shell script '{plot_shell}' has been created successfully.")
 
     def plot_result(self, print_aux=True):
         """Plot data files and save to figures in pic folder"""
@@ -1095,6 +1122,7 @@ class TimeSeriesAnalysis:
             print(f"parallel processing using {num_cores} cores ...")
             Parallel(n_jobs=num_cores)(delayed(mintpy.cli.view.main)(iargs) for iargs in iargs_list)
         else:
+            self.write_plotshell(iargs_list)
             for iargs in iargs_list:
                 mintpy.cli.view.main(iargs)
 
