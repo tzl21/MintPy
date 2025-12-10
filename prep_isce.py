@@ -57,7 +57,6 @@ def prepare_geometry(geom_dir, geom_files=[], metadata=dict(), processor='tops',
 
     print('preparing RSC file for geometry files')
     geom_dir = os.path.abspath(geom_dir)
-
     # default file basenames
     if not geom_files:
         if processor in ['tops', 'stripmap']:
@@ -73,8 +72,6 @@ def prepare_geometry(geom_dir, geom_files=[], metadata=dict(), processor='tops',
             raise Exception(f'unknown processor: {processor}')
 
     # get absolute file paths
-    geom_files = [os.path.join(geom_dir, i) for i in geom_files]
-
     # check the full resolution version if no multilooked version exists
     if all(not os.path.isfile(i) for i in geom_files):
         geom_files = [i+'.full' for i in geom_files]
@@ -94,6 +91,7 @@ def prepare_geometry(geom_dir, geom_files=[], metadata=dict(), processor='tops',
             geom_meta.update(readfile.read_attribute(geom_file, metafile_ext='.xml'))
         else:
             geom_meta.update(readfile.read_attribute(geom_file))
+
 
         # write .rsc file
         rsc_file = geom_file+'.rsc'
@@ -135,13 +133,15 @@ def prepare_stack(obs_file, metadata=dict(), baseline_dict=dict(), update_mode=T
     isce_files = sorted(glob.glob(obs_file))
     if len(isce_files) == 0:
         raise FileNotFoundError(f'NO file found with path pattern: {obs_file}')
-
+    if os.path.splitext(isce_files[0])[1] == '.tif':
+        metafile_ext = '.tif'
+    else:
+        metafile_ext = '.xml'
     # make a copy
     meta = {**metadata}
-
     if MiaplpyConfig is not None:
         print(f'MiaplpyConfig: {MiaplpyConfig}')
-        atr = readfile.read_attribute(isce_files[0], metafile_ext='.xml')
+        atr = readfile.read_attribute(isce_files[0], metafile_ext=metafile_ext)
         meta['LENGTH'] = int(atr['LENGTH'])
         meta['WIDTH']  = int(atr['WIDTH'])
         yscale = 1
@@ -159,13 +159,16 @@ def prepare_stack(obs_file, metadata=dict(), baseline_dict=dict(), update_mode=T
         if 'NCORRLOOKS' in meta.keys():
             meta['NCORRLOOKS'] = float(meta['NCORRLOOKS']) * yscale * xscale
             print('update NCORRLOOKS')
-
+            
+    if metafile_ext == '.tif':
+        meta['ALOOKS'] = np.rint(int(meta.get('ALOOKS', 1)) * 1).astype(int)
+        meta['RLOOKS'] = np.rint(int(meta.get('RLOOKS', 1)) * 1).astype(int)
     # update A/RLOOKS, RANGE/AZIMUTH_PIXEL_SIZE, NCORRLOOKS
     # for low resolution ionosphere from isce2/topsStack
     else:
         keys = ['LENGTH', 'WIDTH']
         if all(x in meta.keys() for x in keys):
-            atr = readfile.read_attribute(isce_files[0], metafile_ext='.xml')
+            atr = readfile.read_attribute(isce_files[0], metafile_ext=metafile_ext)
             if any(int(meta[x]) != int(atr[x]) for x in keys):
                 resize2shape = (int(atr['LENGTH']), int(atr['WIDTH']))
                 meta = attr.update_attribute4resize(meta, resize2shape)
@@ -182,9 +185,8 @@ def prepare_stack(obs_file, metadata=dict(), baseline_dict=dict(), update_mode=T
 
         # merge metadata from: data.rsc, *.unw.xml and DATE12/P_BASELINE_TOP/BOTTOM_HDR
         ifg_meta = {**meta}
-        ifg_meta.update(readfile.read_attribute(isce_file, metafile_ext='.xml'))
+        ifg_meta.update(readfile.read_attribute(isce_file, metafile_ext=metafile_ext))
         ifg_meta = add_ifgram_metadata(ifg_meta, dates, baseline_dict)
-
         # write .rsc file
         rsc_file = isce_file+'.rsc'
         writefile.write_roipac_rsc(ifg_meta, rsc_file,
@@ -229,7 +231,6 @@ def prep_isce(inps):
             baseline_dict = isce_utils.read_baseline_timeseries(
                 inps.baseline_dir,
                 processor=inps.processor)
-
     # prepare metadata for ifgram file
     if inps.obs_files:
         for obs_file in inps.obs_files:
