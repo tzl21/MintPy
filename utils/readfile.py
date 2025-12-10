@@ -1222,7 +1222,6 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
 
         else:
             raise FileNotFoundError('No UAVSAR *.ann file found!')
-
     else:
         # grab all existed potential metadata file given the data file in preferred order/priority
         # .aux.xml file does not have geo-coordinates info
@@ -1235,13 +1234,12 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
             os.path.splitext(fname)[0] + '.hdr',   # created with SUFFIX=REPLACE in gdal envi driver
             fname + '.vrt',
             fname + '.aux.xml',
+            os.path.splitext(fname)[0] + '.tif',
         ]
         metafiles = [i for i in metafiles if os.path.isfile(i)]
-
         # use metadata files with the specified extension if requested
         if metafile_ext:
             metafiles = [i for i in metafiles if i.endswith(metafile_ext)]
-
         # for .tif/.grd files, priority:
         # .rsc > file itself > .xml/.aux.xml/.hdr etc.
         if fext in GDAL_FILE_EXTS and not os.path.isfile(fname + '.rsc'):
@@ -1699,7 +1697,6 @@ def read_gdal_vrt(fname):
     # Using os.fspath to convert Path objects to str, recommended by
     # https://github.com/OSGeo/gdal/issues/1613#issuecomment-824703596
     ds = gdal.Open(os.fspath(fname), gdal.GA_ReadOnly)
-
     atr = {}
     atr['WIDTH']  = ds.RasterXSize
     atr['LENGTH'] = ds.RasterYSize
