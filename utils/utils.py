@@ -100,7 +100,7 @@ def check_loaded_dataset(work_dir='./', print_msg=True, relpath=False):
             obj.open(print_msg=False)
 
             # get the proper lookup table dataset names
-            if processor in ['isce', 'doris']:
+            if processor in ['isce', 'doris','gdal']:
                 dnames = GEOMETRY_DSET_NAMES[1:3]
             elif processor in ['gamma', 'roipac']:
                 dnames = GEOMETRY_DSET_NAMES[3:5]
