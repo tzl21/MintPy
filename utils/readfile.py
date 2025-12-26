@@ -1720,14 +1720,14 @@ def read_gdal_vrt(fname):
     x_step = abs(transform[1])
     y_step = abs(transform[5]) * -1.
 
+    atr['X_STEP'] = x_step
+    atr['Y_STEP'] = y_step
+    atr['X_FIRST'] = x0
+    atr['Y_FIRST'] = y0
+
     # projection / coordinate unit
     srs = osr.SpatialReference(wkt=ds.GetProjection())
     atr['EPSG'] = srs.GetAttrValue('AUTHORITY', 1)
-    if atr['EPSG'] is not None:
-        atr['X_STEP'] = x_step
-        atr['Y_STEP'] = y_step
-        atr['X_FIRST'] = x0
-        atr['Y_FIRST'] = y0
     srs_name = srs.GetName()
     if srs_name and 'UTM' in srs_name:
         atr['UTM_ZONE'] = srs_name.split('UTM zone')[-1].strip()
