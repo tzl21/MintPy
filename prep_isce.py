@@ -161,8 +161,22 @@ def prepare_stack(obs_file, metadata=dict(), baseline_dict=dict(), update_mode=T
             print('update NCORRLOOKS')
             
     if metafile_ext == '.tif':
-        meta['ALOOKS'] = np.rint(int(meta.get('ALOOKS', 1)) * 1).astype(int)
-        meta['RLOOKS'] = np.rint(int(meta.get('RLOOKS', 1)) * 1).astype(int)
+        atr = readfile.read_attribute(isce_files[0], metafile_ext=metafile_ext)
+        yscale = int(meta['LENGTH']) // int(atr['LENGTH'])
+        xscale = int(meta['WIDTH']) // int(atr['WIDTH'])
+        meta['ALOOKS'] = np.rint(int(meta.get('ALOOKS', 1)) * yscale).astype(int)
+        meta['RLOOKS'] = np.rint(int(meta.get('RLOOKS', 1)) * xscale).astype(int)
+        if 'AZIMUTH_PIXEL_SIZE' in meta.keys():
+            meta['AZIMUTH_PIXEL_SIZE'] = float(meta['AZIMUTH_PIXEL_SIZE']) * yscale
+            print('update AZIMUTH_PIXEL_SIZE')
+
+        if 'RANGE_PIXEL_SIZE' in meta.keys():
+            meta['RANGE_PIXEL_SIZE'] = float(meta['RANGE_PIXEL_SIZE']) * xscale
+            print('update RANGE_PIXEL_SIZE')
+
+        if 'NCORRLOOKS' in meta.keys():
+            meta['NCORRLOOKS'] = float(meta['NCORRLOOKS']) * yscale * xscale
+            print('update NCORRLOOKS')
     # update A/RLOOKS, RANGE/AZIMUTH_PIXEL_SIZE, NCORRLOOKS
     # for low resolution ionosphere from isce2/topsStack
     else:
