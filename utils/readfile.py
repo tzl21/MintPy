@@ -160,6 +160,7 @@ DATA_TYPE_NUMPY2GDAL = {
 # 3 - ISCE
 DATA_TYPE_ISCE2NUMPY = {
     'byte'  : 'uint8',
+    'ushort': 'uint16',
     'short' : 'int16',
     'int'   : 'int32',
     'float' : 'float32',
