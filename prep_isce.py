@@ -72,6 +72,7 @@ def prepare_geometry(geom_dir, geom_files=[], metadata=dict(), processor='tops',
             raise Exception(f'unknown processor: {processor}')
 
     # get absolute file paths
+    geom_files = [os.path.join(geom_dir, i) for i in geom_files]
     # check the full resolution version if no multilooked version exists
     if all(not os.path.isfile(i) for i in geom_files):
         geom_files = [i+'.full' for i in geom_files]
@@ -91,7 +92,6 @@ def prepare_geometry(geom_dir, geom_files=[], metadata=dict(), processor='tops',
             geom_meta.update(readfile.read_attribute(geom_file, metafile_ext='.xml'))
         else:
             geom_meta.update(readfile.read_attribute(geom_file))
-
 
         # write .rsc file
         rsc_file = geom_file+'.rsc'
@@ -160,24 +160,6 @@ def prepare_stack(obs_file, metadata=dict(), baseline_dict=dict(), update_mode=T
             meta['NCORRLOOKS'] = float(meta['NCORRLOOKS']) * yscale * xscale
             print('update NCORRLOOKS')
             
-    if metafile_ext == '.tif':
-        atr = readfile.read_attribute(isce_files[0], metafile_ext=metafile_ext)
-        yscale = int(meta['LENGTH']) // int(atr['LENGTH'])
-        xscale = int(meta['WIDTH']) // int(atr['WIDTH'])
-        meta['ALOOKS'] = np.rint(int(meta.get('ALOOKS', 1)) * yscale).astype(int)
-        meta['RLOOKS'] = np.rint(int(meta.get('RLOOKS', 1)) * xscale).astype(int)
-        if 'AZIMUTH_PIXEL_SIZE' in meta.keys():
-            meta['AZIMUTH_PIXEL_SIZE'] = float(meta['AZIMUTH_PIXEL_SIZE']) * yscale
-            print('update AZIMUTH_PIXEL_SIZE')
-
-        if 'RANGE_PIXEL_SIZE' in meta.keys():
-            meta['RANGE_PIXEL_SIZE'] = float(meta['RANGE_PIXEL_SIZE']) * xscale
-            print('update RANGE_PIXEL_SIZE')
-
-        if 'NCORRLOOKS' in meta.keys():
-            meta['NCORRLOOKS'] = float(meta['NCORRLOOKS']) * yscale * xscale
-            print('update NCORRLOOKS')
-    # update A/RLOOKS, RANGE/AZIMUTH_PIXEL_SIZE, NCORRLOOKS
     # for low resolution ionosphere from isce2/topsStack
     else:
         keys = ['LENGTH', 'WIDTH']
@@ -235,7 +217,6 @@ def prep_isce(inps):
             metadata=metadata,
             processor=inps.processor,
             update_mode=inps.update_mode)
-
     # read baseline info
     baseline_dict = {}
     if inps.baseline_dir:
