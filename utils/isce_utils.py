@@ -212,6 +212,11 @@ def load_metadata_directly(xml_file):
     
     # Calculate CENTER_LINE_UTC
     if sensing_mid is not None:
+        if isinstance(sensing_mid, str):
+            # Remove 'Z' if present
+            if sensing_mid.endswith('Z'):
+                sensing_mid = sensing_mid[:-1]
+            sensing_mid = datetime.datetime.fromisoformat(sensing_mid)
         time_seconds = (sensing_mid.hour * 3600.0 +
                        sensing_mid.minute * 60.0 +
                        sensing_mid.second)
