@@ -160,6 +160,18 @@ def prepare_stack(obs_file, metadata=dict(), baseline_dict=dict(), update_mode=T
             meta['NCORRLOOKS'] = float(meta['NCORRLOOKS']) * yscale * xscale
             print('update NCORRLOOKS')
             
+    if metafile_ext == '.tif':
+        atr = readfile.read_attribute(isce_files[0], metafile_ext=metafile_ext)
+        meta['LENGTH'] = int(atr['LENGTH'])
+        meta['WIDTH']  = int(atr['WIDTH'])
+        yscale = int(atr.get('Y_STEP', -10))/(-10)
+        xscale = int(atr.get('X_STEP', 5))/(5)
+        meta['ALOOKS'] = np.rint(int(meta.get('ALOOKS', 1)) * yscale).astype(int)
+        meta['RLOOKS'] = np.rint(int(meta.get('RLOOKS', 1)) * xscale).astype(int)
+        if 'NCORRLOOKS' in meta.keys():
+            meta['NCORRLOOKS'] = float(meta['NCORRLOOKS']) * yscale * xscale
+            print('update NCORRLOOKS')
+
     # for low resolution ionosphere from isce2/topsStack
     else:
         keys = ['LENGTH', 'WIDTH']
