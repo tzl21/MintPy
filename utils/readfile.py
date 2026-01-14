@@ -1703,7 +1703,9 @@ def read_gdal_vrt(fname):
     atr['BANDS'] = ds.RasterCount
 
     # data type
-    atr['DATA_TYPE'] = DATA_TYPE_GDAL2NUMPY[ds.GetRasterBand(1).DataType]
+    # add support for uncommon data types
+    DataType = ds.GetRasterBand(1).DataType if ds.GetRasterBand(1).DataType in DATA_TYPE_GDAL2NUMPY.keys() else 6
+    atr['DATA_TYPE'] = DATA_TYPE_GDAL2NUMPY[DataType]
 
     # interleave
     interleave = ds.GetMetadata('IMAGE_STRUCTURE').get('INTERLEAVE', 'PIXEL')
