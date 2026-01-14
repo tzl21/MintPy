@@ -2105,7 +2105,8 @@ def read_gdal(fname, box=None, band=1, cpx_band='phase', xstep=1, ystep=1):
     data = bnd.ReadAsArray(**kwargs)
 
     # adjust output band for complex data
-    data_type = DATA_TYPE_GDAL2NUMPY[bnd.DataType]
+    DataType = bnd.DataType if bnd.DataType in DATA_TYPE_GDAL2NUMPY.keys() else 6
+    data_type = DATA_TYPE_GDAL2NUMPY[DataType]
     if data_type.replace('>', '').startswith('c'):
         if cpx_band.startswith('real'):
             data = data.real
