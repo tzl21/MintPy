@@ -501,6 +501,28 @@ def extract_multilook_number(geom_dir, meta=dict(), fext_list=['.rdr','.geo','.r
                     meta['RLOOKS'] = int(int(full_dict['WIDTH']) / int(mli_dict['WIDTH']))
                     break
 
+    # Fallback: read ALOOKS/RLOOKS from ENVI .hdr map info
+    # ISCE2 stores multilook factors as x/y posting in map info, e.g. "8, 2" for 8 range x 2 azimuth looks
+    if 'ALOOKS' not in meta:
+        for fbase in ['hgt','lat','lon','los','shadowMask','incLocal']:
+            hdr_file = os.path.join(geom_dir, fbase + '.hdr')
+            if os.path.isfile(hdr_file):
+                try:
+                    hdr_atr = readfile.read_template(hdr_file, delimiter='=')
+                    if 'map info' in hdr_atr:
+                        map_info = [i.replace('{','').replace('}','').strip()
+                                    for i in hdr_atr['map info'].split(',')]
+                        if len(map_info) >= 7:
+                            rlooks = abs(int(float(map_info[5])))
+                            alooks = abs(int(float(map_info[6])))
+                            if rlooks > 1 or alooks > 1:
+                                meta['ALOOKS'] = alooks
+                                meta['RLOOKS'] = rlooks
+                                print(f'read ALOOKS={alooks} RLOOKS={rlooks} from {hdr_file}')
+                                break
+                except Exception:
+                    pass
+
     # default value
     for key in ['ALOOKS', 'RLOOKS']:
         if key not in meta:
