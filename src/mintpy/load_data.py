@@ -402,8 +402,8 @@ def read_inps_dict2ifgram_stack_dict_object(iDict, ds_name2template_key):
         for dsName in dsNameList:
             # search the matching data file for the given date12
             # 1st guess: file in the same order as the one for dsName0
-            dsPath1 = dsPathDict[dsName][i] if i < len(dsPathDict[dsName]) else None
-            if dsPath1 and (all(d6 in dsPath1 for d6 in date6s)
+            dsPath1 = dsPathDict[dsName][i]
+            if (all(d6 in dsPath1 for d6 in date6s)
                     or (date12MJD and date12MJD in dsPath1)):
                 ifgramPathDict[dsName] = dsPath1
 
