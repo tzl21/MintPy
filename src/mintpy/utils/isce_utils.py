@@ -537,8 +537,6 @@ def extract_geometry_metadata(geom_dir, meta=dict(), box=None, fbase_list=['hgt'
         else:
             row_flag = np.sum(data != 0., axis=1) == data.shape[1]
             row_idx = np.where(row_flag)[0]
-            if len(row_idx) == 0:
-                return 0, data.shape[0] - 1
             r0, r1 = row_idx[0] + buffer, row_idx[-1] - buffer
         return r0, r1
 
