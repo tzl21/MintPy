@@ -89,6 +89,10 @@ def create_parser(subparsers=None):
                        help='initial pixel to plot in Y/X coord')
     pixel.add_argument('--lalo', type=float, metavar=('LAT', 'LON'), nargs=2,
                        help='initial pixel to plot in lat/lon coord')
+    pixel.add_argument('--precise', dest='precise', action='store_true',
+                       help='Use floating-point sub-pixel coordinates for '
+                            'reference point, GNSS station extraction, and '
+                            'map clicks (default: %(default)s).')
 
     pixel.add_argument('--marker', type=str, default='o',
                        help='marker style (default: %(default)s).')
@@ -125,10 +129,12 @@ def cmd_line_parse(iargs=None):
     # use sys.argv[1:] for command line call
     inps.argv = iargs or sys.argv[1:]
 
-    # check: --gnss-comp option (not implemented for tsview yet)
-    if inps.gnss_component:
-        msg = f'--gnss-comp is not supported for {os.path.basename(__file__)}'
-        raise NotImplementedError(msg)
+    # check: --gnss-comp option (now implemented)
+    if inps.gnss_component and inps.disp_gnss:
+        vprint = print
+        vprint(f'GNSS component: {inps.gnss_component}')
+        if not inps.lookup_file:
+            vprint('WARNING: --lookup geometry file is recommended for accurate LOS projection')
 
     # check: --label option (same number as input files)
     if inps.file_label:

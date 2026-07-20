@@ -546,12 +546,23 @@ def plot_slice(ax, data, metadata, inps):
         if inps.disp_gnss and inps.gnss_component and inps.ref_gnss_site:
             gnss_obj = gnss.get_gnss_class(inps.gnss_source)(site=inps.ref_gnss_site)
             ref_site_lalo = gnss_obj.get_site_lat_lon()
-            y, x = coord.geo2radar(ref_site_lalo[0], ref_site_lalo[1])[0:2]
-            ref_data = data[y - inps.pix_box[1], x - inps.pix_box[0]]
+            y_global, x_global = coord.geo2radar(ref_site_lalo[0], ref_site_lalo[1])[0:2]
+            y_f = y_global - inps.pix_box[1]
+            x_f = x_global - inps.pix_box[0]
+            # Bilinear interpolation for sub-pixel accuracy at GNSS site
+            y_f = np.clip(y_f, 0, data.shape[0] - 1.001)
+            x_f = np.clip(x_f, 0, data.shape[1] - 1.001)
+            y0, x0 = int(np.floor(y_f)), int(np.floor(x_f))
+            y1, x1 = min(y0 + 1, data.shape[0] - 1), min(x0 + 1, data.shape[1] - 1)
+            wy, wx = y_f - y0, x_f - x0
+            ref_data = ((1 - wy) * (1 - wx) * data[y0, x0] +
+                        (1 - wy) * wx * data[y0, x1] +
+                        wy * (1 - wx) * data[y1, x0] +
+                        wy * wx * data[y1, x1])
             data -= ref_data
-            vprint('referencing InSAR data to the pixel nearest to GNSS station: '
+            vprint('referencing InSAR data to GNSS station via bilinear interpolation: '
                    f'{inps.ref_gnss_site} at [{ref_site_lalo[0]:.6f}, {ref_site_lalo[1]:.6f}] '
-                   f'by substrating {ref_data:.3f} {inps.disp_unit}')
+                   f'by subtracting {ref_data:.3f} {inps.disp_unit}')
             # do not show the original InSAR reference point
             inps.disp_ref_pixel = False
 

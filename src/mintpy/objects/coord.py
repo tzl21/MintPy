@@ -111,11 +111,12 @@ class coordinate:
         return coord1, coord2
 
 
-    def lalo2yx(self, lat_in, lon_in):
+    def lalo2yx(self, lat_in, lon_in, precise=False):
         """convert geo coordinates into radar coordinates for Geocoded file only.
 
         Parameters: lat_in    - list / tuple / 1D np.ndarray / float, coordinate(s) in latitude / northing
                     lon_in    - list / tuple / 1D np.ndarray / float, coordinate(s) in longitude / easting
+                    precise   - bool, if True return float sub-pixel coordinates; if False (default) return int pixel
         Returns:    coord_out - tuple(list / float / 1D np.ndarray), coordinates(s) in (row, col) numbers
         Example:    300, 1000 = coordinate.lalo2yx(32.1, 130.5)
                     300 = coordinate.lalo2yx(32.1, None)[0]
@@ -138,9 +139,13 @@ class coordinate:
         y_out = []
         x_out = []
         for lat_i, lon_i in zip(lat_in, lon_in):
-            # plus 0.01 to be more robust in practice
-            y_i = None if lat_i is None else int(np.floor((lat_i - self.lat0) / self.lat_step + 0.01))
-            x_i = None if lon_i is None else int(np.floor((lon_i - self.lon0) / self.lon_step + 0.01))
+            if precise:
+                y_i = None if lat_i is None else (lat_i - self.lat0) / self.lat_step
+                x_i = None if lon_i is None else (lon_i - self.lon0) / self.lon_step
+            else:
+                # plus 0.01 to be more robust in practice
+                y_i = None if lat_i is None else int(np.floor((lat_i - self.lat0) / self.lat_step + 0.01))
+                x_i = None if lon_i is None else int(np.floor((lon_i - self.lon0) / self.lon_step + 0.01))
             y_out.append(y_i)
             x_out.append(x_i)
 
@@ -264,7 +269,7 @@ class coordinate:
         return lut
 
 
-    def geo2radar(self, lat, lon, print_msg=True, debug_mode=False):
+    def geo2radar(self, lat, lon, print_msg=True, debug_mode=False, precise=False):
         """Convert geo coordinates into radar coordinates.
 
         Parameters: lat/lon   - np.array / float, latitude/longitude
@@ -305,7 +310,7 @@ class coordinate:
 
         self.open()
         if self.geocoded:
-            az, rg = self.lalo2yx(lat, lon)
+            az, rg = self.lalo2yx(lat, lon, precise=precise)
             return az, rg, 0, 0
 
         if not isinstance(lat, np.ndarray):
