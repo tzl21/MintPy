@@ -122,6 +122,12 @@ def prepare_geometry_isce3(geom_dir, out_dir, geom_files=None, metadata=None,
         if geom_path and os.path.isfile(geom_path):
             geom_path = str(geom_path)
             rsc_file = geom_path + '.rsc'
+            # Remove any stale .rsc from a previous run when the merged GeoTIFF
+            # was regenerated, so that read_attribute() reads the fresh tif
+            # (readfile gives the .rsc sidecar priority over the .tif itself).
+            if (update_mode and os.path.isfile(rsc_file)
+                    and os.path.getmtime(geom_path) > os.path.getmtime(rsc_file)):
+                os.remove(rsc_file)
             geom_meta = metadata.copy() if metadata else {}
             geom_meta.update(readfile.read_attribute(geom_path))
             writefile.write_roipac_rsc(geom_meta, rsc_file,
@@ -163,8 +169,15 @@ def prepare_stack_isce3(obs_file, metadata=None, baseline_dict=None, update_mode
         try:
             fbase = os.path.basename(tif_file)
 
-            # Extract date pair(s) from filename
+            # Extract date pair(s) from the basename first, then from the parent
+            # directory name (e.g. Dolphin: ifgrams/YYYYMMDD_YYYYMMDD/fullres.unw.tif)
             date_nums = re.findall(r'\d{8}', fbase)
+            if len(date_nums) < 2:
+                date_pair = re.findall(r'(\d{8})_(\d{8})', os.path.dirname(tif_file))
+                if date_pair:
+                    date_nums = list(date_pair[0])
+                else:
+                    date_nums = re.findall(r'\d{8}', os.path.dirname(tif_file))
             if len(date_nums) < 2:
                 prog_bar.update(i+1, suffix=f'skipped {i+1}/{num_file}')
                 continue
@@ -186,7 +199,7 @@ def prepare_stack_isce3(obs_file, metadata=None, baseline_dict=None, update_mode
                                        update_mode=update_mode,
                                        print_msg=False)
 
-        except Exception as e:
+        except Exception:
             prog_bar.update(i+1, suffix=f'error {i+1}/{num_file}')
             continue
 
