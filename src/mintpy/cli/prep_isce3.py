@@ -7,19 +7,15 @@
 
 
 import glob
-import sys
 import os
+import sys
+
 from mintpy.utils.arg_utils import create_argument_parser
+from mintpy.utils.isce3_utils import GEOMETRY_FILENAMES
 
 #########################################################################
 # Default geometry files to extract from static_layers HDF5
-GEOMETRY_FILENAMES = [
-    'height.tif',
-    'los_east.tif',
-    'los_north.tif',
-    'layover_shadow_mask.tif',
-    'local_incidence_angle.tif',
-]
+# (single source of truth defined in mintpy.utils.isce3_utils)
 
 EXAMPLE = """example:
   ## Dolphin/ISCE-3 topsStack (auto‑generate metadata)

@@ -7,7 +7,7 @@ from mintpy.utils import isce3_utils, ptime, readfile, writefile
 
 
 #########################################################################
-def add_ifgram_metadata(metadata_in, dates=[], baseline_dict={}):
+def add_ifgram_metadata(metadata_in, dates=None, baseline_dict=None):
     """Add metadata unique for each interferogram.
 
     Parameters: metadata_in   : dict, input common metadata for the entire dataset
@@ -15,6 +15,8 @@ def add_ifgram_metadata(metadata_in, dates=[], baseline_dict={}):
                 baseline_dict : dict, output of baseline_timeseries()
     Returns:    metadata      : dict, updated metadata
     """
+    dates = dates or []
+    baseline_dict = baseline_dict or {}
     metadata = metadata_in.copy()
     metadata['DATE12'] = f'{dates[0][2:]}-{dates[1][2:]}'
 
@@ -28,25 +30,36 @@ def add_ifgram_metadata(metadata_in, dates=[], baseline_dict={}):
 
 
 def prepare_geometry_isce3(geom_dir, out_dir, geom_files=None, metadata=None,
-                           processor='tops', update_mode=True, ref_int_file=None,
-                           target_shape=None, geom_dirs=None):
+                           update_mode=True, ref_int_file=None, geom_dirs=None):
     """Prepare geometry files from ISCE3/Dolphin static_layers HDF5.
 
     Parameters
     ----------
-    target_shape : tuple of (length, width), optional
-        Interferogram dimensions.
+    geom_dir : str
+        Directory containing burst subdirectories with static_layers*.h5 files.
+    out_dir : str
+        Output directory for merged geometry files.
+    geom_files : list of str, optional
+        Geometry file basenames to extract/merge. Defaults to
+        isce3_utils.GEOMETRY_FILENAMES.
+    metadata : dict, optional
+        Common metadata dict, updated with LENGTH/WIDTH and ALOOKS/RLOOKS.
+    update_mode : bool
+        Skip writing .rsc sidecar files if no new metadata.
+    ref_int_file : str, optional
+        Reference interferogram GeoTIFF, used to set the output grid and
+        to derive ALOOKS/RLOOKS from the full-resolution pixel size.
+    geom_dirs : list of str, optional
+        Additional directories (from glob expansion) containing
+        static_layers*.h5 files.
     """
-    from pathlib import Path
-
     print('preparing geometry files from ISCE3/Dolphin static layers')
     geom_dir = os.path.abspath(geom_dir)
     out_dir = os.path.abspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     if geom_files is None:
-        geom_files = ['height.tif', 'los_east.tif', 'los_north.tif',
-                      'layover_shadow_mask.tif', 'local_incidence_angle.tif']
+        geom_files = isce3_utils.GEOMETRY_FILENAMES
 
     # Step 0: Read full-resolution pixel size from first static_layers.h5
     burst_full_dx = None
@@ -190,11 +203,24 @@ def prepare_stack_isce3(obs_file, metadata=None, baseline_dict=None, update_mode
             num_valid += 1
             prog_bar.update(i+1, suffix=f'{dates[0]}_{dates[1]} {i+1}/{num_file}')
 
+            rsc_file = tif_file + '.rsc'
+            # regenerate a stale sidecar written by an older version of this
+            # script (missing PROCESSOR=isce3, e.g. carrying the buggy 90-deg
+            # CENTER_INCIDENCE_ANGLE), instead of propagating old values
+            if os.path.isfile(rsc_file):
+                old_processor = readfile.read_roipac_rsc(rsc_file).get('PROCESSOR')
+                if not update_mode or old_processor != 'isce3':
+                    os.remove(rsc_file)
+
             ifg_meta = meta.copy()
             ifg_meta.update(readfile.read_attribute(tif_file))
+            # the declared processor from the common metadata is authoritative;
+            # restore it in case read_attribute detected a generic gdal product
+            # (e.g. Dolphin "fullres.unw.tif" before the naming-pattern detection)
+            if meta.get('PROCESSOR'):
+                ifg_meta['PROCESSOR'] = meta['PROCESSOR']
             ifg_meta = add_ifgram_metadata(ifg_meta, dates, baseline_dict)
 
-            rsc_file = tif_file + '.rsc'
             writefile.write_roipac_rsc(ifg_meta, rsc_file,
                                        update_mode=update_mode,
                                        print_msg=False)
@@ -248,16 +274,13 @@ def prep_isce3(inps):
             update_mode=inps.update_mode
         )
 
-    # Determine target shape from first interferogram if available
-    target_shape = None
+    # Determine reference interferogram to set the geometry output grid and
+    # to derive ALOOKS/RLOOKS from the full-resolution pixel size
     ref_int = None
     if inps.obs_files:
         int_list = glob.glob(inps.obs_files[0])
         if int_list:
             ref_int = int_list[0]
-            int_atr = readfile.read_attribute(ref_int)
-            target_shape = (int(int_atr['LENGTH']), int(int_atr['WIDTH']))
-            print(f'Target shape from interferogram: {target_shape}')
 
     # Prepare geometry (updates metadata with LENGTH/WIDTH)
     if inps.geom_dir:
@@ -266,10 +289,8 @@ def prep_isce3(inps):
             out_dir=inps.out_dir,
             geom_files=inps.geom_files,
             metadata=metadata,
-            processor=inps.processor,
             update_mode=inps.update_mode,
             ref_int_file=ref_int,
-            target_shape=target_shape,
             geom_dirs=getattr(inps, 'geom_dirs', None)
         )
 

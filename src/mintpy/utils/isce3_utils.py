@@ -1,32 +1,19 @@
+import glob
 import os
 import re
-import json
-import math
 import tempfile
 import shutil
 import xml.etree.ElementTree as ET
 import xml.dom.minidom
 from pathlib import Path
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
-import h5py
-import numpy as np
-from osgeo import gdal, osr
-
-from mintpy.utils import ptime, readfile
-from mintpy.objects import sensor
-
-try:
-    from scipy.interpolate import CubicHermiteSpline
-except ImportError:
-    CubicHermiteSpline = None
-    print("Warning: scipy not available. Hermite interpolation will fall back to linear.")
-
-
 # Ensure PROJ/GDAL data paths are set when running without conda activation,
 # otherwise osr.ImportFromEPSG() fails with "proj_create_from_database" errors.
+# This must run BEFORE "from osgeo import gdal, osr" so that the PROJ context
+# is initialized with the correct data directory.
 def _setup_gdal_proj_data():
     import sys
     for env_key, subdir, probe in [('PROJ_DATA', 'share/proj', 'proj.db'),
@@ -38,6 +25,39 @@ def _setup_gdal_proj_data():
             os.environ[env_key] = data_dir
 
 _setup_gdal_proj_data()
+
+import h5py  # noqa: E402
+import numpy as np  # noqa: E402
+from osgeo import gdal, osr  # noqa: E402
+
+from mintpy.utils import readfile  # noqa: E402
+from mintpy.objects import sensor  # noqa: E402
+
+try:
+    from scipy.interpolate import CubicHermiteSpline
+except ImportError:
+    CubicHermiteSpline = None
+    print("Warning: scipy not available. Orbit interpolation will fall back to linear.")
+
+
+# Default geometry layers to extract from the ISCE3/Dolphin static_layers HDF5
+# file, together with their dataset names under /data. Single source of truth
+# used by cli/prep_isce3.py and prep_isce3.py as well.
+GEOMETRY_FILENAMES = [
+    'height.tif',
+    'los_east.tif',
+    'los_north.tif',
+    'layover_shadow_mask.tif',
+    'local_incidence_angle.tif',
+]
+
+GEOMETRY_DSET_MAPPING = {
+    "height.tif": "z",
+    "layover_shadow_mask.tif": "layover_shadow_mask",
+    "local_incidence_angle.tif": "local_incidence_angle",
+    "los_east.tif": "los_east",
+    "los_north.tif": "los_north",
+}
 
 
 def extract_isce3_metadata(meta_file: str, update_mode: bool = True) -> dict:
@@ -89,7 +109,6 @@ def extract_isce3_metadata(meta_file: str, update_mode: bool = True) -> dict:
     sensing_mid = get_value('sensingMid')
     if sensing_mid:
         try:
-            from datetime import datetime
             dt = datetime.strptime(sensing_mid, '%Y-%m-%d %H:%M:%S.%f')
             seconds_of_day = dt.hour * 3600.0 + dt.minute * 60.0 + dt.second + dt.microsecond / 1e6
             meta['CENTER_LINE_UTC'] = str(seconds_of_day)
@@ -161,15 +180,24 @@ def extract_isce3_metadata(meta_file: str, update_mode: bool = True) -> dict:
     if meta.get('earthRadius') and not meta.get('EARTH_RADIUS'):
         meta['EARTH_RADIUS'] = meta['earthRadius']
 
-    # Compute center incidence angle if possible
+    # Compute center incidence angle if possible.
+    # NOTE: the old formula (look_angle = asin(R/(R+H)) followed by
+    # asin((R+H)/R * sin(look_angle))) always collapses to exactly 90 degrees.
+    # Use the standard law-of-cosines solution in the triangle formed by the
+    # satellite, the target and the earth center, i.e. the same convention as
+    # ut.incidence_angle(atr, dimension=0) in utils0.py (measured from the
+    # local vertical; near-/mid-range slant range).
     if meta.get('HEIGHT') and meta.get('EARTH_RADIUS') and meta.get('startingRange'):
         try:
             H = float(meta['HEIGHT'])
             R = float(meta['EARTH_RADIUS'])
-            sr = float(meta['startingRange'])
-            look_angle = np.arcsin(R / (R + H))
-            inc_angle = np.arcsin((R + H) / R * np.sin(look_angle))
-            meta['CENTER_INCIDENCE_ANGLE'] = str(np.rad2deg(inc_angle))
+            rho = float(meta['startingRange'])
+            # use the mid-range slant range when the scene width is known
+            if meta.get('WIDTH') and meta.get('rangePixelSize'):
+                rho += float(meta['WIDTH']) / 2.0 * float(meta['rangePixelSize'])
+            cos_inc = ((R + H) ** 2 - R ** 2 - rho ** 2) / (2.0 * R * rho)
+            inc_angle = np.rad2deg(np.arccos(np.clip(cos_inc, -1.0, 1.0)))
+            meta['CENTER_INCIDENCE_ANGLE'] = str(inc_angle)
         except (ValueError, TypeError):
             pass
 
@@ -214,28 +242,41 @@ def read_baseline_timeseries_isce3(baseline_dir: str, processor: str = 'tops') -
         Dictionary of baseline values keyed by date (YYYYMMDD).
         Each value is [bperp_top, bperp_bottom] (identical for both).
     """
-    import glob
-    import os
-    from mintpy.utils import ptime
-
     baseline_dict = {}
-    
-    # Find all .txt files matching the pattern YYYYMMDD_YYYYMMDD.txt
-    pattern = os.path.join(baseline_dir, '[0-9]*_[0-9]*.txt')
-    txt_files = sorted(glob.glob(pattern))
-    
+
+    # Expand any glob pattern in the baseline dir itself first (e.g. the
+    # Dolphin layout ".../baselines/t124*/" or ".../baselines/t124*/20210104/"),
+    # then collect YYYYMMDD_YYYYMMDD.txt files from each matched directory.
+    txt_files = []
+    for bdir in sorted(glob.glob(baseline_dir)) or [baseline_dir]:
+        if not os.path.isdir(bdir):
+            continue
+        txt_files += sorted(glob.glob(os.path.join(bdir, '[0-9]*_[0-9]*.txt')))
+    txt_files = sorted(set(txt_files))
+
+    # Fall back to a recursive search for the nested Dolphin layout, e.g.
+    # ".../baselines/t124_xxx/YYYYMMDD_YYYYMMDD.txt" when the baseline dir
+    # is given without any glob (e.g. just "../../baselines").
+    if not txt_files:
+        for bdir in sorted(glob.glob(baseline_dir)) or [baseline_dir]:
+            if not os.path.isdir(bdir):
+                continue
+            txt_files += sorted(
+                glob.glob(os.path.join(bdir, '**', '[0-9]*_[0-9]*.txt'),
+                          recursive=True))
+        txt_files = sorted(set(txt_files))
+
     if not txt_files:
         print(f'WARNING: no baseline text files found in {os.path.abspath(baseline_dir)}')
         return baseline_dict
 
     # Identify the common reference date from filenames (first part before underscore)
     ref_date_candidates = [os.path.basename(f).split('_')[0] for f in txt_files]
-    from collections import Counter
     ref_date = Counter(ref_date_candidates).most_common(1)[0][0]
-    
+
     # Filter files that start with the reference date
     bFiles = [f for f in txt_files if os.path.basename(f).startswith(ref_date)]
-    
+
     # Read each file
     for bFile in bFiles:
         filename = os.path.basename(bFile)
@@ -243,8 +284,8 @@ def read_baseline_timeseries_isce3(baseline_dir: str, processor: str = 'tops') -
         dates = date_pair.split('_')
         if len(dates) != 2:
             continue
-        date1, date2 = dates
-        
+        date2 = dates[1]
+
         # Parse file content (robust: handles Bperp average (m), Bperp (m), bperp, etc.)
         bperp = 0.0
         with open(bFile, 'r') as f:
@@ -257,13 +298,13 @@ def read_baseline_timeseries_isce3(baseline_dir: str, processor: str = 'tops') -
                     except ValueError:
                         pass
                     break
-        
+
         # For tops, top and bottom are assumed equal (average)
         baseline_dict[date2] = [bperp, bperp]
-    
+
     # Set reference date baseline to [0, 0]
     baseline_dict[ref_date] = [0.0, 0.0]
-    
+
     return baseline_dict
 
 
@@ -297,13 +338,7 @@ def extract_h5_geometry(
         Keys are geometry types, values are dicts with 'file_list' and 'nodata'.
     """
     if dataset_mapping is None:
-        dataset_mapping = {
-            "height.tif": "z",
-            "layover_shadow_mask.tif": "layover_shadow_mask",
-            "local_incidence_angle.tif": "local_incidence_angle",
-            "los_east.tif": "los_east",
-            "los_north.tif": "los_north",
-        }
+        dataset_mapping = GEOMETRY_DSET_MAPPING
 
     extracted = defaultdict(lambda: {'file_list': None, 'nodata': None})
     h5_file = Path(h5_file)
@@ -435,13 +470,7 @@ def build_vrt_from_h5(
         and 'nodata'.
     """
     if dataset_mapping is None:
-        dataset_mapping = {
-            "height.tif": "z",
-            "layover_shadow_mask.tif": "layover_shadow_mask",
-            "local_incidence_angle.tif": "local_incidence_angle",
-            "los_east.tif": "los_east",
-            "los_north.tif": "los_north",
-        }
+        dataset_mapping = GEOMETRY_DSET_MAPPING
 
     extracted = defaultdict(lambda: {'file_list': None, 'nodata': None})
     h5_file = Path(h5_file).resolve()
@@ -595,102 +624,104 @@ def merge_geometry_files(
                             nodata_dict[gtype] = info['nodata']
         return geometry_files, nodata_dict
 
-    # Fast path: VRTs referencing HDF5 subdatasets directly, no full-res raster
-    # copy. Fall back to the legacy GeoTIFF extraction on any failure.
-    try:
-        geometry_files, nodata_dict = _collect(use_vrt=True)
-    except Exception as e:
-        print(f'WARNING: fast VRT-based merge failed: {e}')
-        print('         Falling back to legacy per-burst GeoTIFF extraction ...')
-        geometry_files, nodata_dict = _collect(use_vrt=False)
-
-    if not any(geometry_files.values()):
-        print('#' * 60)
-        print('WARNING: no geometry layers extracted from any static_layers*.h5!')
-        print('         Merged geometry files will NOT be (re)generated;')
-        print('         stale files in the output directory may be reused downstream.')
-        print('         Check the "Error processing ..." messages above.')
-        print('#' * 60)
-
-    # Determine output bounds and resolution from reference interferogram if provided
-    bounds, xres, yres, expected_size = None, None, None, None
-    if ref_int_file and os.path.exists(ref_int_file):
-        ds = gdal.Open(str(ref_int_file))
-        gt = ds.GetGeoTransform()
-        xmin = gt[0]
-        ymax = gt[3]
-        xmax = xmin + gt[1] * ds.RasterXSize
-        ymin = ymax + gt[5] * ds.RasterYSize
-        bounds = (xmin, ymin, xmax, ymax)
-        xres, yres = abs(gt[1]), abs(gt[5])
-        expected_size = (ds.RasterXSize, ds.RasterYSize)
-        ds = None
-
-    # Merge each geometry type using gdal.Warp (python API, streams block-wise)
     merged = {}
-    for gtype, file_list in geometry_files.items():
-        if not file_list:
-            continue
-        out_file = output_dir / gtype
-        if out_file.exists():
-            out_file.unlink()
+    try:
+        # Fast path: VRTs referencing HDF5 subdatasets directly, no full-res raster
+        # copy. Fall back to the legacy GeoTIFF extraction on any failure.
+        try:
+            geometry_files, nodata_dict = _collect(use_vrt=True)
+        except Exception as e:
+            print(f'WARNING: fast VRT-based merge failed: {e}')
+            print('         Falling back to legacy per-burst GeoTIFF extraction ...')
+            geometry_files, nodata_dict = _collect(use_vrt=False)
 
-        print(f"Merging {gtype} from {len(file_list)} bursts using gdal.Warp...")
-        warp_kwargs = dict(
-            format='GTiff',
-            creationOptions=['COMPRESS=LZW'],
-            resampleAlg='near',
-            multithread=True,
-            warpOptions=['NUM_THREADS=ALL_CPUS'],
-        )
-        if bounds is not None:
-            warp_kwargs.update(outputBounds=bounds, xRes=xres, yRes=yres)
-        nodata = nodata_dict.get(gtype)
-        if nodata is not None:
-            warp_kwargs.update(dstNodata=nodata)
+        if not any(geometry_files.values()):
+            print('#' * 60)
+            print('WARNING: no geometry layers extracted from any static_layers*.h5!')
+            print('         Merged geometry files will NOT be (re)generated;')
+            print('         stale files in the output directory may be reused downstream.')
+            print('         Check the "Error processing ..." messages above.')
+            print('#' * 60)
 
-        ds_out = gdal.Warp(str(out_file), [str(f) for f in file_list], **warp_kwargs)
-        if ds_out is None:
-            raise RuntimeError(f'gdal.Warp failed for {gtype} '
-                               f'(inputs: {[str(f) for f in file_list]})')
+        # Determine output bounds and resolution from reference interferogram if provided
+        bounds, xres, yres, expected_size = None, None, None, None
+        if ref_int_file and os.path.exists(ref_int_file):
+            ds = gdal.Open(str(ref_int_file))
+            gt = ds.GetGeoTransform()
+            xmin = gt[0]
+            ymax = gt[3]
+            xmax = xmin + gt[1] * ds.RasterXSize
+            ymin = ymax + gt[5] * ds.RasterYSize
+            bounds = (xmin, ymin, xmax, ymax)
+            xres, yres = abs(gt[1]), abs(gt[5])
+            expected_size = (ds.RasterXSize, ds.RasterYSize)
+            ds = None
 
-        # Validate output grid and report coverage
-        out_size = (ds_out.RasterXSize, ds_out.RasterYSize)
-        if expected_size is not None and out_size != expected_size:
-            raise RuntimeError(f'merged {gtype} size {out_size} does not match '
-                               f'reference interferogram size {expected_size}')
-        arr = ds_out.GetRasterBand(1).ReadAsArray()
-        if nodata is not None and not (isinstance(nodata, float) and np.isnan(nodata)):
-            valid_ratio = float(np.mean(arr != nodata))
-        else:
-            valid_ratio = float(np.mean(np.isfinite(arr)))
-        print(f'    size: {out_size[0]} x {out_size[1]}, valid pixels: {valid_ratio:.1%}')
-        ds_out = None
-        merged[gtype] = out_file
+        # Merge each geometry type using gdal.Warp (python API, streams block-wise)
+        for gtype, file_list in geometry_files.items():
+            if not file_list:
+                continue
+            out_file = output_dir / gtype
+            if out_file.exists():
+                out_file.unlink()
 
-    # Compute incidence angle and azimuth angle if los_east and los_north are present
-    los_east = merged.get('los_east.tif')
-    los_north = merged.get('los_north.tif')
-    if los_east and los_north:
-        inc_file = output_dir / 'incidenceAngle.tif'
-        compute_incidence_angle(
-            los_east, los_north, inc_file,
-            nodata=nodata_dict.get('los_east.tif')
-        )
-        merged['incidenceAngle.tif'] = inc_file
+            print(f"Merging {gtype} from {len(file_list)} bursts using gdal.Warp...")
+            warp_kwargs = dict(
+                format='GTiff',
+                creationOptions=['COMPRESS=LZW'],
+                resampleAlg='near',
+                multithread=True,
+                warpOptions=['NUM_THREADS=ALL_CPUS'],
+            )
+            if bounds is not None:
+                warp_kwargs.update(outputBounds=bounds, xRes=xres, yRes=yres)
+            nodata = nodata_dict.get(gtype)
+            if nodata is not None:
+                warp_kwargs.update(dstNodata=nodata)
 
-        az_file = output_dir / 'azimuthAngle.tif'
-        compute_azimuth_angle(
-            los_east, los_north, az_file,
-            nodata=nodata_dict.get('los_east.tif')
-        )
-        merged['azimuthAngle.tif'] = az_file
+            ds_out = gdal.Warp(str(out_file), [str(f) for f in file_list], **warp_kwargs)
+            if ds_out is None:
+                raise RuntimeError(f'gdal.Warp failed for {gtype} '
+                                   f'(inputs: {[str(f) for f in file_list]})')
 
-    # Clean up temporary directory if not keeping
-    if not keep_temp:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+            # Validate output grid and report coverage
+            out_size = (ds_out.RasterXSize, ds_out.RasterYSize)
+            if expected_size is not None and out_size != expected_size:
+                raise RuntimeError(f'merged {gtype} size {out_size} does not match '
+                                   f'reference interferogram size {expected_size}')
+            arr = ds_out.GetRasterBand(1).ReadAsArray()
+            if nodata is not None and not (isinstance(nodata, float) and np.isnan(nodata)):
+                valid_ratio = float(np.mean(arr != nodata))
+            else:
+                valid_ratio = float(np.mean(np.isfinite(arr)))
+            print(f'    size: {out_size[0]} x {out_size[1]}, valid pixels: {valid_ratio:.1%}')
+            ds_out = None
+            merged[gtype] = out_file
 
-    return merged
+        # Compute incidence angle and azimuth angle if los_east and los_north are present
+        los_east = merged.get('los_east.tif')
+        los_north = merged.get('los_north.tif')
+        if los_east and los_north:
+            inc_file = output_dir / 'incidenceAngle.tif'
+            compute_incidence_angle(
+                los_east, los_north, inc_file,
+                nodata=nodata_dict.get('los_east.tif')
+            )
+            merged['incidenceAngle.tif'] = inc_file
+
+            az_file = output_dir / 'azimuthAngle.tif'
+            compute_azimuth_angle(
+                los_east, los_north, az_file,
+                nodata=nodata_dict.get('los_east.tif')
+            )
+            merged['azimuthAngle.tif'] = az_file
+
+        return merged
+
+    finally:
+        # Always clean up the temporary directory, even when the merge failed.
+        if not keep_temp:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 def compute_azimuth_angle(los_east_file: Path, los_north_file: Path, output_file: Path, nodata: float = None):
     """Compute azimuth angle from LOS east and north components.
@@ -918,11 +949,7 @@ def _compute_heading(state_vector):
         if np.abs(lat_new - lat) < 1e-12:
             break
         lat = lat_new
-    
-    # Altitude
-    N = a / np.sqrt(1 - e2 * np.sin(lat)**2)
-    alt = p / np.cos(lat) - N
-    
+
     # Calculate ENU basis vectors at satellite position
     sin_lat = np.sin(lat)
     cos_lat = np.cos(lat)
@@ -976,7 +1003,28 @@ def _orbit_interp_hermite(metadata, time):
     """
     # Extract time array
     t_array = np.array(metadata['time'])
-    
+
+    if CubicHermiteSpline is None:
+        # scipy is not available: fall back to linear interpolation of the
+        # position with velocity estimated by central differences.
+        def _pos(vals, t):
+            return np.interp(t, t_array, vals)
+
+        def _vel(vals, t):
+            dt = np.abs(t_array[1] - t_array[0]) * 0.5
+            t_lo = np.clip(np.asarray(t, dtype=float) - dt, t_array[0], t_array[-1])
+            t_hi = np.clip(np.asarray(t, dtype=float) + dt, t_array[0], t_array[-1])
+            return (np.interp(t_hi, t_array, vals) - np.interp(t_lo, t_array, vals)) / (2.0 * dt)
+
+        if np.isscalar(time):
+            position = np.array([_pos(metadata[f'position_{c}'], time) for c in 'xyz'])
+            velocity = np.array([_vel(metadata[f'velocity_{c}'], time) for c in 'xyz'])
+        else:
+            time_array = np.asarray(time)
+            position = np.column_stack([_pos(metadata[f'position_{c}'], time_array) for c in 'xyz'])
+            velocity = np.column_stack([_vel(metadata[f'velocity_{c}'], time_array) for c in 'xyz'])
+        return position, velocity
+
     # Create Hermite interpolators for each component
     # Position interpolation with velocity as derivatives
     pos_x_interp = CubicHermiteSpline(t_array, metadata['position_x'], metadata['velocity_x'])
@@ -1267,12 +1315,13 @@ def extract_required_attributes(metadata):
             velocity = np.linalg.norm(sv[1])
             position = sv[0]
             ellipsoid = isce3.core.Ellipsoid()
+            # xyz_to_lon_lat() returns (lon, lat, h) in radians/meters
             llh = ellipsoid.xyz_to_lon_lat(position)
             heading = _compute_heading(sv)
             meta['satelliteSpeed'] = velocity
             meta['position'] = position
             meta['HEADING'] = heading
-            meta['earthRadius'] = ellipsoid.r_dir(math.radians(heading), llh[1])
+            meta['earthRadius'] = ellipsoid.r_dir(llh[1], llh[0])
             meta['altitude'] = llh[2]
         except Exception as e:
             print(f"WARNING: orbit interpolation failed: {e}. Using default values.")
@@ -1288,7 +1337,6 @@ def extract_required_attributes(metadata):
     # Calculate frame numbers
     if meta['ascendingNodeTime'] is not None and meta['burstStartUTC']:
         try:
-            from datetime import datetime
             start_dt = datetime.strptime(meta['burstStartUTC'], '%Y-%m-%d %H:%M:%S.%f')
             if isinstance(meta['ascendingNodeTime'], str):
                 node_dt = datetime.strptime(meta['ascendingNodeTime'], '%Y-%m-%d %H:%M:%S.%f')

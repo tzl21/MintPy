@@ -1257,11 +1257,7 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
 
         atr = {}
         # PROCESSOR
-        if fext in ['.tif', '.tiff'] and fbase.endswith('.int'):
-            atr = read_isce3_geotiff(fname)
-            return atr
-
-        elif fname.endswith('.img') and any(i.endswith('.hdr') for i in metafiles):
+        if fname.endswith('.img') and any(i.endswith('.hdr') for i in metafiles):
             atr['PROCESSOR'] = 'snap'
 
         elif any(i.endswith(('.xml', '.hdr', '.vrt')) for i in metafiles):
@@ -1279,12 +1275,22 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
 
         elif fext in GDAL_FILE_EXTS:
             atr['PROCESSOR'] = 'gdal'
-            # Recognize ISCE3/Dolphin geocoded products by naming pattern
+            # Recognize ISCE3/Dolphin geocoded products by naming pattern.
+            # Dolphin may name the files "fullres.unw.tif" with the date pair
+            # in the parent directory name (e.g. ifgrams/20220105_20220117/).
             if (fext in ['.tif', '.tiff']
                     and (fbase.endswith('.unw') or fbase.endswith('.cor')
-                         or fbase.endswith('.int') or fbase.endswith('.unw.conncomp'))
-                    and re.search(r'\d{8}_\d{8}', fbase)):
-                atr['PROCESSOR'] = 'isce3'
+                         or fbase.endswith('.int') or fbase.endswith('.unw.conncomp'))):
+                has_date_pair = bool(re.search(r'\d{8}_\d{8}', fbase))
+                if not has_date_pair:
+                    has_date_pair = bool(
+                        re.search(r'\d{8}_\d{8}', os.path.basename(os.path.dirname(fname))))
+                if has_date_pair:
+                    atr['PROCESSOR'] = 'isce3'
+                    # supplement with ISCE3-specific attributes (DATA_TYPE,
+                    # EPSG, DATE12, ...); any .rsc sidecar (read below) still
+                    # takes priority over these values.
+                    atr.update(read_isce3_geotiff(fname))
 
         if 'PROCESSOR' not in atr.keys():
             atr['PROCESSOR'] = 'mintpy'
@@ -1332,7 +1338,9 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
 
         elif meta_ext in ['.vrt'] + GDAL_FILE_EXTS:
             atr.update(read_gdal_vrt(metafile))
-            atr['FILE_TYPE'] = fext
+            # keep the ISCE3-specific FILE_TYPE (e.g. '.unw' for *.unw.tif)
+            # set by read_isce3_geotiff() above
+            atr.setdefault('FILE_TYPE', fext)
 
         # DATA_TYPE for ISCE/ROI_PAC products
         data_type_dict = {
@@ -1399,9 +1407,16 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
 
     return atr
 
-from osgeo import gdal, osr
+
 def read_isce3_geotiff(fname):
-    """Read attributes from ISCE3/Dolphin GeoTIFF file (e.g., .int.tif)."""
+    """Read attributes from ISCE3/Dolphin GeoTIFF file (e.g., .int.tif / .unw.tif).
+
+    NOTE: called from read_attribute() for ISCE3/Dolphin geocoded products to
+    supplement the common attributes (DATA_TYPE, EPSG, DATE12, ...). Any .rsc
+    sidecar file is still given priority over these values.
+    """
+    from osgeo import gdal, osr
+
     ds = gdal.Open(fname, gdal.GA_ReadOnly)
     if ds is None:
         raise ValueError(f"Cannot open {fname} with GDAL")
@@ -1432,14 +1447,16 @@ def read_isce3_geotiff(fname):
         if epsg:
             meta['EPSG'] = epsg
 
-    # Data type
+    # Data type (exact numpy-style mapping, e.g. float32/float64/int16/uint8)
     band = ds.GetRasterBand(1)
-    dtype = gdal.GetDataTypeName(band.DataType).lower()
-    if 'float' in dtype:
-        meta['DATA_TYPE'] = 'float32'
-    elif 'int' in dtype:
-        meta['DATA_TYPE'] = 'int16'
-    meta['NO_DATA_VALUE'] = str(band.GetNoDataValue())
+    data_type = DATA_TYPE_GDAL2NUMPY.get(band.DataType)
+    if data_type:
+        meta['DATA_TYPE'] = data_type.replace('>', '').replace('<', '')
+
+    # No-data value (skip when the band has none, instead of writing 'None')
+    nodata = band.GetNoDataValue()
+    if nodata is not None:
+        meta['NO_DATA_VALUE'] = 'nan' if np.isnan(nodata) else str(float(nodata))
 
     # File type and processor
     fbase = os.path.basename(fname).lower()
@@ -1451,15 +1468,19 @@ def read_isce3_geotiff(fname):
         meta['FILE_TYPE'] = '.unw'
     meta['PROCESSOR'] = 'isce3'
 
-    # Extract DATE12 from filename
+    # Extract DATE12 from the file name (or its parent directory, e.g. Dolphin
+    # "ifgrams/20220105_20220117/fullres.unw.tif")
     # Pattern: YYYYMMDD_YYYYMMDD.int.tif
     match = re.search(r'(\d{8})_(\d{8})', fname)
+    if not match:
+        match = re.search(r'(\d{8})_(\d{8})', os.path.basename(os.path.dirname(fname)))
     if match:
         d1, d2 = match.groups()
         meta['DATE12'] = f"{d1[2:]}-{d2[2:]}"
 
     ds = None
     return meta
+
 
 def auto_no_data_value(meta):
     """Get default no-data-value for the given file's metadata.

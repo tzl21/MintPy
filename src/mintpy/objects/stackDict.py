@@ -617,6 +617,8 @@ class geometryDict:
                     target_width    - int, target columns
         Returns:    data            - np.ndarray (target_length, target_width)
         """
+        import tempfile
+
         src_file = self.datasetDict[dsName]
         ref_file = self.datasetDict[self.dsNames[0]]
         ref_ds = gdal.Open(ref_file)
@@ -633,31 +635,43 @@ class geometryDict:
 
         src_ds = gdal.Open(src_file)
         src_srs = src_ds.GetProjection()
+        src_ds = None
         if not src_srs:
             # source file may lack embedded projection (e.g. GeoTIFF
             # written before PROJ_DATA was set). Assume EPSG:4326.
             print('    (source water mask has no projection, assuming EPSG:4326)')
             src_srs = 'EPSG:4326'
 
-        # Use gdalwarp CLI for reliable CRS handling (Python API may
-        # not apply -s_srs correctly for files missing embedded SRS).
-        import tempfile, subprocess
-        tmp_f = tempfile.mktemp(suffix='.tif')
-        cmd = [
-            'gdalwarp', '-overwrite', '-q',
-            '-s_srs', src_srs, '-t_srs', ref_srs,
-            '-te', str(xmin), str(ymin), str(xmax), str(ymax),
-            '-tr', str(dx), str(dy),
-            '-r', 'near',
-            '-of', 'GTiff', '-co', 'COMPRESS=LZW',
-            src_file, tmp_f,
-        ]
-        subprocess.run(cmd, check=True)
-        tmp_ds = gdal.Open(tmp_f)
-        result = tmp_ds.GetRasterBand(1).ReadAsArray()
-        tmp_ds = None
-        src_ds = None
-        os.remove(tmp_f)
+        # Use the GDAL Python API (same engine as the gdalwarp CLI), with a
+        # guaranteed temp-file cleanup via try/finally.
+        tmp_fd, tmp_f = tempfile.mkstemp(suffix='.tif')
+        os.close(tmp_fd)
+        try:
+            warp_kwargs = dict(
+                format='GTiff',
+                srcSRS=src_srs,
+                dstSRS=ref_srs,
+                outputBounds=(xmin, ymin, xmax, ymax),
+                xRes=dx,
+                yRes=dy,
+                resampleAlg='near',
+                creationOptions=['COMPRESS=LZW'],
+            )
+            tmp_ds = gdal.Warp(tmp_f, src_file, **warp_kwargs)
+            if tmp_ds is None:
+                raise RuntimeError(f'gdal.Warp failed for water mask: {src_file}')
+            result = tmp_ds.GetRasterBand(1).ReadAsArray()
+            tmp_ds = None
+        finally:
+            if os.path.isfile(tmp_f):
+                os.remove(tmp_f)
+
+        # verify the output grid matches the reference geometry grid
+        # (float rounding in -te/-tr can rarely produce a +/-1 pixel difference)
+        if result.shape != (target_length, target_width):
+            print(f'    WARNING: warped waterMask size {result.shape} != '
+                  f'target ({target_length}, {target_width}); cropping to target size')
+            result = result[:target_length, :target_width]
         return result
 
     def write2hdf5(self, outputFile='geometryRadar.h5', access_mode='w', box=None, xstep=1, ystep=1,
