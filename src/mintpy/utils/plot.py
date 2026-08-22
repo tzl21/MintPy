@@ -1150,16 +1150,24 @@ def plot_num_triplet_with_nonzero_integer_ambiguity(fname, disp_fig=False, font_
 
     # subplot 2 - histogram
     ax = axs[1]
-    ax.hist(data[~np.isnan(data)].flatten(), range=(0, vmax), log=True, bins=vmax)
-
-    # axis format
     ax.set_xlabel(r'# of triplets w non-zero int ambiguity $T_{int}$', fontsize=font_size)
-    ax.set_ylabel('# of pixels', fontsize=font_size)
-    ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-    ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
-    ax.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, numticks=15,
-                                                 subs=(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)))
-    ax.yaxis.set_minor_formatter(ticker.NullFormatter())
+    if vmax > 0:
+        ax.hist(data[~np.isnan(data)].flatten(), range=(0, vmax), log=True, bins=vmax)
+
+        # axis format
+        ax.set_ylabel('# of pixels', fontsize=font_size)
+        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
+        ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
+        ax.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, numticks=15,
+                                                     subs=(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)))
+        ax.yaxis.set_minor_formatter(ticker.NullFormatter())
+    else:
+        # no pixel with non-zero integer ambiguity (e.g. all valid closure phases
+        # are consistent): show a note instead of a degenerate histogram with bins=0
+        ax.text(0.5, 0.5, 'No pixel with non-zero\ninteger ambiguity',
+                ha='center', va='center', transform=ax.transAxes, fontsize=font_size)
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     for ax in axs:
         ax.tick_params(which='both', direction='in', labelsize=font_size,
