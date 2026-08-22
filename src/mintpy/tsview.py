@@ -84,6 +84,13 @@ def read_init_info(inps):
     inps.num_date = len(inps.date_list)
     inps.dates, inps.yearList = ptime.date_list2vector(inps.date_list)
 
+    # default GNSS data date range to the InSAR data range
+    if inps.disp_gnss and inps.date_list:
+        if not inps.gnss_start_date:
+            inps.gnss_start_date = inps.date_list[0]
+        if not inps.gnss_end_date:
+            inps.gnss_end_date = inps.date_list[-1]
+
     (inps.ex_date_list,
      inps.ex_dates,
      inps.ex_flag) = read_exclude_date(inps.ex_date_list, inps.date_list)
@@ -1416,7 +1423,8 @@ class timeseriesViewer():
         vprint(f'create figure for point in size of [{self.figsize_pts[0]:.1f}, {self.figsize_pts[1]:.1f}]')
         self.fig_pts, self.ax_pts = plt.subplots(num=self.figname_pts, figsize=self.figsize_pts)
         if self.yx:
-            d_ts, m_strs = self.plot_point_timeseries(self.yx)
+            gnss_data = self._get_gnss_data_at_pixel(self.yx)
+            d_ts, m_strs = self.plot_point_timeseries(self.yx, gnss_data=gnss_data)
 
             # save figures and data to files
             if self.save_fig:
@@ -1647,6 +1655,50 @@ class timeseriesViewer():
 
         return self.tslider
 
+
+    def _get_gnss_data_at_pixel(self, yx):
+        """Return the GNSS time series of the station nearest to the given pixel
+        (within a small distance tolerance), for overlaying on the point plot."""
+        if not (self.disp_gnss and self.gnss_component):
+            return None
+        if not (hasattr(self, 'gnss_site_lats') and self.gnss_site_lats.size > 0):
+            return None
+
+        # pixel -> lat/lon
+        if self.lalo is not None:
+            y_lalo, x_lalo = self.lalo
+        else:
+            y_lalo, x_lalo = self.coord.radar2geo(yx[0], yx[1], print_msg=False)[0:2]
+
+        # convert UTM northing/easting (in meters) to lat/lon if needed
+        if abs(y_lalo) > 90 or abs(x_lalo) > 180:
+            from pyproj import CRS, Transformer
+            utm_zone = self.atr.get('UTM_ZONE', None)
+            if not utm_zone:
+                return None
+            zone_num = int(''.join(filter(str.isdigit, utm_zone)))
+            hemisphere = 'north' if utm_zone[-1].upper() == 'N' else 'south'
+            utm_crs = CRS.from_proj4(
+                f'+proj=utm +zone={zone_num} +{hemisphere} '
+                '+ellps=WGS84 +datum=WGS84 +units=m +no_defs')
+            wgs84 = CRS.from_epsg(4326)
+            transformer = Transformer.from_crs(utm_crs, wgs84, always_xy=True)
+            x_lalo, y_lalo = transformer.transform(x_lalo, y_lalo)
+
+        # nearest GNSS station within tolerance
+        dist = np.sqrt((self.gnss_site_lons - x_lalo) ** 2
+                       + (self.gnss_site_lats - y_lalo) ** 2)
+        tol_deg = 0.005
+        if not np.any(dist < tol_deg):
+            return None
+        site = self.gnss_site_names[int(np.argmin(dist))]
+        vprint(f'Selected pixel is near GNSS station: {site}')
+        try:
+            dates, dis = self._get_gnss_timeseries(site)
+            return {'dates': dates, 'dis': dis, 'label': f'GNSS {site}'}
+        except Exception as e:
+            vprint(f'Failed to get GNSS data for {site}: {e}')
+            return None
 
     def plot_point_timeseries(self, yx, gnss_data=None):
         """Plot point displacement time-series at pixel [y, x]
