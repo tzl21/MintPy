@@ -1360,6 +1360,22 @@ def plot_gnss(ax, SNWE, inps, metadata=dict(), print_msg=True):
         msk = inps.msk if inps.msk.ndim == 2 else np.prod(inps.msk, axis=-1)
         coord = coordinate(metadata)
         site_ys, site_xs = coord.geo2radar(site_lats, site_lons)[0:2]
+        site_ys = np.array(site_ys, dtype=float)
+        site_xs = np.array(site_xs, dtype=float)
+        # convert full-resolution y/x to the display frame
+        # (subset by pix_box, then multilook with nearest sampling)
+        if getattr(inps, 'pix_box', None) is not None:
+            site_ys = site_ys - inps.pix_box[1]
+            site_xs = site_xs - inps.pix_box[0]
+        ml = getattr(inps, 'multilook_num', 1)
+        if ml > 1:
+            site_ys = site_ys // ml
+            site_xs = site_xs // ml
+        site_ys = site_ys.astype(int)
+        site_xs = site_xs.astype(int)
+        # guard against out-of-range indices
+        site_ys = np.clip(site_ys, 0, msk.shape[0] - 1)
+        site_xs = np.clip(site_xs, 0, msk.shape[1] - 1)
         flag = msk[site_ys, site_xs] != 0
         # update station list
         site_names = site_names[flag]
