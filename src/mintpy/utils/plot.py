@@ -1150,16 +1150,24 @@ def plot_num_triplet_with_nonzero_integer_ambiguity(fname, disp_fig=False, font_
 
     # subplot 2 - histogram
     ax = axs[1]
-    ax.hist(data[~np.isnan(data)].flatten(), range=(0, vmax), log=True, bins=vmax)
-
-    # axis format
     ax.set_xlabel(r'# of triplets w non-zero int ambiguity $T_{int}$', fontsize=font_size)
-    ax.set_ylabel('# of pixels', fontsize=font_size)
-    ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-    ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
-    ax.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, numticks=15,
-                                                 subs=(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)))
-    ax.yaxis.set_minor_formatter(ticker.NullFormatter())
+    if vmax > 0:
+        ax.hist(data[~np.isnan(data)].flatten(), range=(0, vmax), log=True, bins=vmax)
+
+        # axis format
+        ax.set_ylabel('# of pixels', fontsize=font_size)
+        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
+        ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
+        ax.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, numticks=15,
+                                                     subs=(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)))
+        ax.yaxis.set_minor_formatter(ticker.NullFormatter())
+    else:
+        # no pixel with non-zero integer ambiguity (e.g. all valid closure phases
+        # are consistent): show a note instead of a degenerate histogram with bins=0
+        ax.text(0.5, 0.5, 'No pixel with non-zero\ninteger ambiguity',
+                ha='center', va='center', transform=ax.transAxes, fontsize=font_size)
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     for ax in axs:
         ax.tick_params(which='both', direction='in', labelsize=font_size,
@@ -1352,6 +1360,22 @@ def plot_gnss(ax, SNWE, inps, metadata=dict(), print_msg=True):
         msk = inps.msk if inps.msk.ndim == 2 else np.prod(inps.msk, axis=-1)
         coord = coordinate(metadata)
         site_ys, site_xs = coord.geo2radar(site_lats, site_lons)[0:2]
+        site_ys = np.array(site_ys, dtype=float)
+        site_xs = np.array(site_xs, dtype=float)
+        # convert full-resolution y/x to the display frame
+        # (subset by pix_box, then multilook with nearest sampling)
+        if getattr(inps, 'pix_box', None) is not None:
+            site_ys = site_ys - inps.pix_box[1]
+            site_xs = site_xs - inps.pix_box[0]
+        ml = getattr(inps, 'multilook_num', 1)
+        if ml > 1:
+            site_ys = site_ys // ml
+            site_xs = site_xs // ml
+        site_ys = site_ys.astype(int)
+        site_xs = site_xs.astype(int)
+        # guard against out-of-range indices
+        site_ys = np.clip(site_ys, 0, msk.shape[0] - 1)
+        site_xs = np.clip(site_xs, 0, msk.shape[1] - 1)
         flag = msk[site_ys, site_xs] != 0
         # update station list
         site_names = site_names[flag]

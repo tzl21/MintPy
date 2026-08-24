@@ -314,6 +314,9 @@ def add_gnss_argument(parser):
                       help='Mask out GNSS stations not coincident with valid data pixels')
     gnss.add_argument('--gnss-ms','--gps-ms', dest='gnss_marker_size', type=float, default=6, metavar='NUM',
                       help='Plot GNSS value as scatter in size of ms**2 (default: %(default)s).')
+    gnss.add_argument('--gnss-median-remove','--gnss-median', dest='gnss_median_remove', action='store_true',
+                      help='Remove per-station median InSAR-GNSS bias for each station individually for '
+                           'reference frame alignment (robust to outlier stations).')
 
     return parser
 
