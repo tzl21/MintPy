@@ -24,7 +24,7 @@ classifiers=[
 # see section: setuptools_scm
 # https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html#dynamic-metadata
 # dependencies will be read from text files
-dynamic = ["version", "readme", "dependencies", "optional-dependencies"]
+dynamic = ["version", "readme", "dependencies"]
 
 [project.urls]
 Homepage = "https://github.com/insarlab/MintPy"
@@ -116,21 +116,26 @@ dependencies = { file = ["requirements.txt"] }
 readme = { file = ["docs/README.md"], content-type = "text/markdown" }
 
 # extra requirements: `pip install mintpy[test]` or `pip install .[test]`
-[tool.setuptools.dynamic.optional-dependencies.test]
-file = ["tests/requirements.txt"]
-
-[tool.setuptools.dynamic.optional-dependencies.slc2ifg]
-dependencies = [
+[project.optional-dependencies]
+test = [
+    "gdal",
+    "libgdal-netcdf",
+    "isce2",
+    "pre-commit",
+    "pyfftw",
+    "pytest",
+    "setuptools_scm",
+]
+# slc2ifg extra: algorithm-only dependencies for the SLC->ifg pipeline
+slc2ifg = [
     "dolphin>=0.35",
     "rasterio>=1.3",
     "pyproj>=3.3",
 ]
-
 # the slc2ifg engine (Dask scheduling, GPU kernels, tiling, artifact mgmt)
 # lives inside mintpy.stdproc.slc2ifg.engine; dask is a hard engine dep,
 # cupy is only needed for GPU kernels (engine degrades to CPU without it).
-[tool.setuptools.dynamic.optional-dependencies.engine]
-dependencies = [
+engine = [
     "dask[distributed]>=2023",
     "tqdm>=4.60",
     "cupy-cuda12x>=13",
