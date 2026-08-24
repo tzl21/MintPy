@@ -62,6 +62,137 @@ gdal.UseExceptions()
 
 logger = logging.getLogger(__name__)
 
+
+def _open_wbd(wbd_path):
+    """Open a .wbd water-body raster as a WGS84 GDAL dataset.
+
+    Supports three companion-metadata layouts:
+    - ``.wbd.rsc`` (ISCE-style; the format produced by ``sardem ... -o
+      swbd.wbd`` on the Guam run): binary + RSC text metadata;
+    - ``.wbd.vrt`` (sardem GeoTIFF/ENVI companion): GDAL-readable directly;
+    - ``.wbd.json`` (earthscope-style): binary + JSON metadata.
+
+    Returns an open GDAL dataset (caller closes it) or ``None``.
+    """
+    from osgeo import gdal, osr
+
+    p = str(wbd_path)
+    base = os.path.splitext(p)[0]
+
+    # 1) GDAL-readable companion (.vrt)
+    vrt = base + '.vrt'
+    if os.path.isfile(vrt):
+        ds = gdal.Open(vrt, gdal.GA_ReadOnly)
+        if ds is not None:
+            return ds
+
+    # 2) ISCE-style .rsc companion: the binary is `xxx.wbd` and its
+    #    metadata is `xxx.wbd.rsc` (NOT `xxx.rsc` — keep the .wbd stem).
+    rsc = p + '.rsc'
+    if os.path.isfile(rsc):
+        meta = {}
+        with open(rsc) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meta[parts[0]] = parts[1]
+        width = int(float(meta['WIDTH']))
+        length = int(float(meta['FILE_LENGTH']))
+        x_first = float(meta['X_FIRST'])
+        y_first = float(meta['Y_FIRST'])
+        x_step = float(meta['X_STEP'])
+        y_step = float(meta['Y_STEP'])
+        raw = np.fromfile(p, dtype=np.uint8)
+        if raw.size != width * length:
+            raise ValueError(
+                f"wbd binary size {raw.size} != WIDTH*FILE_LENGTH "
+                f"{width}x{length} from {rsc}")
+        data = raw.reshape(length, width)
+        ds = gdal.GetDriverByName('MEM').Create(
+            '', width, length, 1, gdal.GDT_Byte)
+        ds.SetGeoTransform((x_first, x_step, 0, y_first, 0, y_step))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        ds.SetProjection(srs.ExportToWkt())
+        ds.GetRasterBand(1).WriteArray(data)
+        return ds
+
+    # 3) earthscope-style .json companion
+    js = base + '.json'
+    if os.path.isfile(js):
+        import json
+        with open(js) as f:
+            meta = json.load(f)
+        raw = np.fromfile(p, dtype=np.uint8)
+        data = raw.reshape(meta['height'], meta['width'])
+        ds = gdal.GetDriverByName('MEM').Create(
+            '', meta['width'], meta['height'], 1, gdal.GDT_Byte)
+        ds.SetGeoTransform(
+            (meta['lon0'], meta['dlon'], 0, meta['lat0'], 0, meta['dlat']))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        ds.SetProjection(srs.ExportToWkt())
+        ds.GetRasterBand(1).WriteArray(data)
+        return ds
+
+    logger.warning("wbd %s has no .rsc/.vrt/.json companion — skipped", p)
+    return None
+
+
+def wbd_to_mask_array(wbd_path, ifg_path, invert=True):
+    """Load a .wbd water mask warped onto the interferogram's grid.
+
+    Parameters
+    ----------
+    wbd_path : str
+        Path to the .wbd water-body raster (with .rsc / .vrt / .json).
+    ifg_path : str
+        Path to the (wrapped) interferogram raster defining the target grid
+        (geotransform + projection, typically UTM).
+    invert : bool
+        True -> return 1 = valid/land, 0 = water (SNAPHU mask semantics);
+        False -> return 1 = water, 0 = land (raw .wbd semantics).
+
+    Returns
+    -------
+    np.ndarray (uint8) on the interferogram grid, or None on any failure.
+    """
+    from osgeo import gdal
+
+    ifg_ds = gdal.Open(str(ifg_path), gdal.GA_ReadOnly)
+    if ifg_ds is None:
+        logger.warning("wbd: cannot open interferogram %s", ifg_path)
+        return None
+    rows, cols = ifg_ds.RasterYSize, ifg_ds.RasterXSize
+    gt = ifg_ds.GetGeoTransform()
+    proj = ifg_ds.GetProjection()
+    ifg_ds = None
+
+    src = _open_wbd(wbd_path)
+    if src is None:
+        return None
+
+    dst = gdal.GetDriverByName('MEM').Create('', cols, rows, 1, gdal.GDT_Byte)
+    dst.SetGeoTransform(gt)
+    dst.SetProjection(proj)
+
+    try:
+        gdal.ReprojectImage(
+            src, dst, src.GetProjection(), proj,
+            gdal.GRA_NearestNeighbour)
+        warped = dst.GetRasterBand(1).ReadAsArray()
+    except Exception as e:
+        logger.warning("wbd reprojection failed: %s", e)
+        warped = None
+    finally:
+        src = None
+        dst = None
+
+    if warped is None:
+        return None
+    water = (warped > 0).astype(np.uint8)
+    return (1 - water).astype(np.uint8) if invert else water
+
 # ------------------------------------------------------------------------
 # Active SNAPHU subprocess registry
 # ------------------------------------------------------------------------
@@ -600,12 +731,21 @@ def _unwrap_single(
     # Zero-valued magnitude → invalid
     mask_zeros = (ifg_data.real == 0) & (ifg_data.imag == 0)
 
-    # External mask
+    # External mask: .wbd water masks are warped onto the ifg grid (SNAPHU
+    # semantics: 1 = valid/land, 0 = water/excluded); any other GDAL-readable
+    # file is used as-is.
     mask_array = None
     if mask_path is not None and mask_path.exists():
-        mask_ds = gdal.Open(str(mask_path), gdal.GA_ReadOnly)
-        mask_array = mask_ds.GetRasterBand(1).ReadAsArray().astype(np.uint8)
-        mask_ds = None
+        if str(mask_path).lower().endswith('.wbd'):
+            mask_array = wbd_to_mask_array(
+                str(mask_path), str(ifg_path), invert=True)
+            if mask_array is not None:
+                logger.info("wbd water mask applied: %d water pixel(s) excluded",
+                            int(np.count_nonzero(mask_array == 0)))
+        else:
+            mask_ds = gdal.Open(str(mask_path), gdal.GA_ReadOnly)
+            mask_array = mask_ds.GetRasterBand(1).ReadAsArray().astype(np.uint8)
+            mask_ds = None
 
     # Initial phase
     init_phase_array = None

@@ -498,6 +498,8 @@ class BasicExecutor(Slc2ifgExecutor):
                                        processor)
             cor = coh_path if coh_path.exists() else None
             mask = self._opt('slc2ifg.unwrap.snaphu.mask_file')
+            if not mask:
+                mask = self._opt('mintpy.load.waterMaskFile')
             _unwrap_single(
                 ifg_path=Path(in_path),
                 cor_path=Path(cor) if cor else None,

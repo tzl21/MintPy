@@ -1023,6 +1023,13 @@ class Engine:
             # phase-sigma window size (looks product of the preceding stage)
             base['ps_nlks'] = self._ps_nlks()
         if tool == 'unwrap':
+            # waterMaskFile from MintPy's load section doubles as the SNAPHU
+            # mask when slc2ifg.unwrap.snaphu.mask_file is not set (the .wbd
+            # water mask is auto-converted to the ifg grid by _unwrap_single).
+            if 'mask_file' not in base or not base['mask_file']:
+                wm = get_opt(cfg, 'mintpy.load.waterMaskFile')
+                if wm:
+                    base['mask_file'] = wm
             base['nlooks'] = (
                 _legacy_opt(cfg, 'slc2ifg.unwrap.snaphu.nlooks',
                             'slc2ifg.unwrap.nlooks', 'float')
