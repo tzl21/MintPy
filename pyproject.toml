@@ -87,6 +87,9 @@ Issues = "https://github.com/insarlab/MintPy/issues"
 "save_roipac.py" = "mintpy.cli.save_roipac:main"
 "save_explorer.py" = "mintpy.cli.save_explorer:main"
 "smallbaselineApp.py" = "mintpy.cli.smallbaselineApp:main"
+"slc2ifg.py" = "mintpy.cli.slc2ifg:main"
+"slc2ifg_engine" = "mintpy.stdproc.slc2ifg.engine.run_engine:main"
+"insarflow" = "mintpy.stdproc.slc2ifg.engine.run_engine:main"  # backward-compat alias
 "solid_earth_tides.py" = "mintpy.cli.solid_earth_tides:main"
 "spatial_average.py" = "mintpy.cli.spatial_average:main"
 "spatial_filter.py" = "mintpy.cli.spatial_filter:main"
@@ -116,6 +119,23 @@ readme = { file = ["docs/README.md"], content-type = "text/markdown" }
 [tool.setuptools.dynamic.optional-dependencies.test]
 file = ["tests/requirements.txt"]
 
+[tool.setuptools.dynamic.optional-dependencies.slc2ifg]
+dependencies = [
+    "dolphin>=0.35",
+    "rasterio>=1.3",
+    "pyproj>=3.3",
+]
+
+# the slc2ifg engine (Dask scheduling, GPU kernels, tiling, artifact mgmt)
+# lives inside mintpy.stdproc.slc2ifg.engine; dask is a hard engine dep,
+# cupy is only needed for GPU kernels (engine degrades to CPU without it).
+[tool.setuptools.dynamic.optional-dependencies.engine]
+dependencies = [
+    "dask[distributed]>=2023",
+    "tqdm>=4.60",
+    "cupy-cuda12x>=13",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -126,6 +146,9 @@ mintpy = [
     "data/colormaps/*.cpt",
     "defaults/*.cfg",
     "defaults/*.yaml",
+    # slc2ifg (SLC-to-interferogram pre-processing) shipped assets
+    "stdproc/slc2ifg/template/*.cfg",
+    "stdproc/slc2ifg/bin/*",
 ]
 
 [tool.setuptools_scm]

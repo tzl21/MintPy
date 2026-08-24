@@ -150,6 +150,47 @@ class TimeSeriesAnalysis:
                     break
 
 
+    def run_slc2ifg(self, step_name):
+        """Generate unwrapped interferograms from SLC images (pre-processing).
+
+        Runs the slc2ifg pipeline with the backend selected by
+        ``mintpy.slc2ifg.engine`` (none | insarflow | auto).  Skipped when
+        ``mintpy.slc2ifg.skip = yes`` or ``slc2ifg.slc_input`` is not set.
+        The merged template is written to ``<work_dir>/slc2ifg.cfg`` so the
+        engine backend reads the full configuration from a file.
+        """
+        # skip when disabled
+        if str(self.template.get('mintpy.slc2ifg.skip', 'no')).lower() in ('yes', 'true', '1'):
+            print('skip slc2ifg (mintpy.slc2ifg.skip = yes)')
+            return
+
+        # skip when no SLC input is configured
+        slc_input = self.template.get('slc2ifg.slc_input', 'auto')
+        if not slc_input or str(slc_input).lower() == 'auto':
+            print('skip slc2ifg (slc2ifg.slc_input not set)')
+            return
+
+        # merged config: the USER custom template first (it may contain
+        # slc2ifg-only keys that do not exist in the default smallbaselineApp
+        # template and were dropped by update_template_file), then the merged
+        # default template (self.template) so 'auto' values are resolved.
+        merged = {}
+        if self.customTemplateFile:
+            merged.update(readfile.read_template(self.customTemplateFile))
+        merged.update(self.template)
+
+        # write the merged config to a file (the engine backend reads a file)
+        cfg_file = os.path.join(self.workDir, 'slc2ifg.cfg')
+        with open(cfg_file, 'w') as f:
+            for key, value in merged.items():
+                f.write(f'{key} = {value}\n')
+        print(f'write merged slc2ifg config to file: {cfg_file}')
+
+        # run
+        import mintpy.slc2ifg
+        mintpy.slc2ifg.run_slc2ifg(cfg_file=cfg_file)
+        return
+
     def run_load_data(self, step_name):
         """Load InSAR stacks into HDF5 files in ./inputs folder.
         It 1) copy auxiliary files into work directory (for Unvi of Miami only)
@@ -917,7 +958,10 @@ class TimeSeriesAnalysis:
         for sname in steps:
             print(f'\n\n******************** step - {sname} ********************')
 
-            if sname == 'load_data':
+            if sname == 'slc2ifg':
+                self.run_slc2ifg(sname)
+
+            elif sname == 'load_data':
                 self.run_load_data(sname)
 
             elif sname == 'modify_network':

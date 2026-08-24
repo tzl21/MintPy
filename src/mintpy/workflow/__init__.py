@@ -12,6 +12,7 @@ import mintpy
 
 # expose the following modules
 __all__ = [
+    'slc2ifg',
     'dem_error',
     'diff',
     'generate_mask',

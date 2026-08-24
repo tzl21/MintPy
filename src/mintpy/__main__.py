@@ -427,6 +427,13 @@ def get_smallbaselineApp_parser(subparsers=None):
     return parser
 
 
+def get_slc2ifg_parser(subparsers=None):
+    from mintpy.cli import slc2ifg
+    parser = slc2ifg.create_parser(subparsers)
+    parser.set_defaults(func=slc2ifg.main)
+    return parser
+
+
 def get_solid_earth_tides_parser(subparsers=None):
     from mintpy.cli import solid_earth_tides
     parser = solid_earth_tides.create_parser(subparsers)
@@ -600,6 +607,7 @@ def get_parser():
 
     # workflow
     get_smallbaselineApp_parser(sp)
+    get_slc2ifg_parser(sp)
 
     # standard processing
     get_asc_desc2horz_vert_parser(sp)

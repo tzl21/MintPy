@@ -7,12 +7,11 @@
 
 import logging
 import os
-import warnings
 
 import h5py
 import numpy as np
 
-from mintpy.stdproc.multilook import multilook_data, multilook_gdal
+from mintpy.stdproc.multilook import multilook_data, multilook_tif
 from mintpy.utils import attribute as attr, readfile, writefile
 
 # suppress numpy.RuntimeWarning message
@@ -80,8 +79,18 @@ def multilook_file(infile, lks_y, lks_x, outfile=None, method='mean', max_memory
         box = (0, 0, width, length)
 
     # use GDAL if input is VRT file
+    # (multilook_tif replaces the legacy gdal.Translate-based multilook_gdal;
+    #  method=nearest keeps the legacy gdal.Translate default resampling)
     if infile.endswith('.vrt'):
-        outfile = multilook_gdal(infile, lks_y, lks_x, box=box, out_file=outfile)
+        if not outfile:
+            if infile.endswith('.rdr.full.vrt'):
+                outfile = infile[:-9]
+            elif infile.endswith('.rdr.vrt'):
+                outfile = infile[:-4] + '.mli'
+            else:
+                raise ValueError(f'un-recognized ISCE VRT file ({infile})!')
+        outfile = multilook_tif(infile, lks_y, lks_x, method='nearest',
+                                processor='isce2', box=box, output_tif=outfile)
         return outfile
 
     # output file name
