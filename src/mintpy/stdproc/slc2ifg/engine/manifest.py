@@ -148,7 +148,7 @@ def plan_cleanup(
     keep_suffixes = keep_suffixes or []
     # Final products + inputs are always kept
     keep_suffixes = list(keep_suffixes) + [
-        '.unw', '.unw.tif', '.conncomp', '.conncomp.tif',
+        '.unw', '.unw.tif', '.unw.conncomp', '.unw.conncomp.tif', '.conncomp', '.conncomp.tif',
         '_phsig.coh', '_phsig.coh.tif',
         '.slc', '.slc.tif', '.slc.h5',
         'ifgram_list.txt', MANIFEST_NAME,

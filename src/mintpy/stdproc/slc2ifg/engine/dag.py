@@ -184,7 +184,7 @@ class TaskGraph:
             stem = name
             if processor == 'isce3' and stem.endswith('.tif'):
                 stem = stem[:-4]
-            for prod in ('.conncomp', '.int', '.unw', '.coh'):
+            for prod in ('.unw.conncomp', '.conncomp', '.int', '.unw', '.coh'):
                 if stem.endswith(prod):
                     stem = stem[: -len(prod)]
                     break

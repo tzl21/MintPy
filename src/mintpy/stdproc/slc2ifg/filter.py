@@ -171,7 +171,7 @@ Examples:
     parser.add_argument(
         '--conncomp-pattern',
         help='Pattern for connected component files. If not set, uses processor default: '
-             '".conncomp.tif" for isce3, ".conncomp" for isce2.'
+             '".unw.conncomp.tif" for isce3, ".unw.conncomp" for isce2.'
     )
 
     parser.add_argument(
@@ -210,7 +210,7 @@ Examples:
     if args.cor_pattern is None:
         args.cor_pattern = "**/*_phsig.coh.tif" if args.processor == "isce3" else "**/*_phsig.coh"
     if args.conncomp_pattern is None:
-        args.conncomp_pattern = "**/*.conncomp.tif" if args.processor == "isce3" else "**/*.conncomp"
+        args.conncomp_pattern = "**/*.unw.conncomp.tif" if args.processor == "isce3" else "**/*.unw.conncomp"
 
     return args
 

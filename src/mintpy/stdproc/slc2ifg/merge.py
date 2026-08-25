@@ -100,8 +100,8 @@ def parse_arguments(args_list: Optional[List[str]] = None) -> argparse.Namespace
     parser.add_argument(
         "--intf-types",
         nargs="+",
-        default=[".int.tif", "_phsig.coh.tif", "_cpx.coh.tif", ".unw.tif", ".conncomp.tif"],
-        help="Interferogram file types to process (default: .int.tif _phsig.coh.tif _cpx.coh.tif .unw.tif .conncomp.tif)"
+        default=[".int.tif", "_phsig.coh.tif", "_cpx.coh.tif", ".unw.tif", ".unw.conncomp.tif"],
+        help="Interferogram file types to process (default: .int.tif _phsig.coh.tif _cpx.coh.tif .unw.tif .unw.conncomp.tif)"
     )
 
     parser.add_argument(
@@ -896,7 +896,7 @@ def merge_interferograms(
     intf_files = defaultdict(lambda: defaultdict(list))
 
     # Expected extensions based on processor
-    expected_exts = ['.int', '.unw', '.coh', '.conncomp'] if processor == 'isce2' else ['.int.tif', '.unw.tif', '.coh.tif', '.conncomp.tif']
+    expected_exts = ['.int', '.unw', '.coh', '.conncomp'] if processor == 'isce2' else ['.int.tif', '.unw.tif', '.coh.tif', '.unw.conncomp.tif', '.conncomp.tif']
 
     for burst_id in burst_ids:
         burst_intf_dir = intf_dir / burst_id / "ifgrams"
