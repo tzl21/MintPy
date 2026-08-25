@@ -16,11 +16,11 @@ SLC products (``slc_dir``):
 Interferogram products (``intf_dir``):
     isce2:  ``intf_dir/date_pair/xxx.int``
             ``intf_dir/date_pair/xxx.unw``
-            ``intf_dir/date_pair/xxx.conncomp``
+            ``intf_dir/date_pair/xxx.unw.conncomp``
             ``intf_dir/date_pair/xxx_cpx.coh``        (complex coherence)
             ``intf_dir/date_pair/xxx_phsig.coh``      (phase-sigma coherence)
     isce3:  same with ``.tif`` appended: ``xxx.int.tif``, ``xxx.unw.tif``,
-            ``xxx.conncomp.tif``, ``xxx_cpx.coh.tif``, ``xxx_phsig.coh.tif``
+            ``xxx.unw.conncomp.tif``, ``xxx_cpx.coh.tif``, ``xxx_phsig.coh.tif``
 
 where ``date_pair`` = ``{date1}_{date2}`` and the interferogram variant
 ``xxx`` is one of:
@@ -118,8 +118,8 @@ def unw_ext(processor: str) -> str:
 
 
 def conncomp_ext(processor: str) -> str:
-    """Extension of connected-component files: ``.conncomp`` / ``.conncomp.tif``."""
-    return _ext(processor, ".conncomp")
+    """Extension of connected-component files: ``.unw.conncomp`` / ``.unw.conncomp.tif``."""
+    return _ext(processor, ".unw.conncomp")
 
 
 def coh_ext(processor: str, kind: str = COH_KIND_PHSIG) -> str:
@@ -188,7 +188,7 @@ def conncomp_path(
     variant: str = "fullres",
     processor: str = "isce3",
 ) -> Path:
-    """Path of connected components ``{date_pair}/{variant}.conncomp[.tif]``."""
+    """Path of connected components ``{date_pair}/{variant}.unw.conncomp[.tif]``."""
     if not is_valid_variant(variant):
         raise ValueError(f"Invalid variant '{variant}', expected one of {IFG_VARIANTS}")
     return date_pair_dir(output_dir, date1, date2) / f"{variant}{conncomp_ext(processor)}"
@@ -245,8 +245,8 @@ def strip_product_extensions(name: str, processor: str) -> str:
     # Remove trailing processor extension (.tif for isce3)
     if processor == "isce3" and stem.endswith(".tif"):
         stem = stem[:-4]
-    # Remove product extension
-    for prod_ext in (".conncomp", ".int", ".unw", ".coh"):
+    # Remove product extension (check .unw.conncomp before .unw/.conncomp)
+    for prod_ext in (".unw.conncomp", ".conncomp", ".int", ".unw", ".coh"):
         if stem.endswith(prod_ext):
             stem = stem[: -len(prod_ext)]
             break

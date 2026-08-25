@@ -21,7 +21,7 @@ slc_dir/yyyymmdd.slc.tif | .slc.h5         (isce3)
 
 intf_dir/{date1}_{date2}/xxx.int[.tif]        wrapped interferogram
 intf_dir/{date1}_{date2}/xxx.unw[.tif]        unwrapped phase
-intf_dir/{date1}_{date2}/xxx.conncomp[.tif]   connected components
+intf_dir/{date1}_{date2}/xxx.unw.conncomp[.tif] connected components
 intf_dir/{date1}_{date2}/xxx_cpx.coh[.tif]    complex coherence (optional)
 intf_dir/{date1}_{date2}/xxx_phsig.coh[.tif]  phase-sigma coherence
 ```
