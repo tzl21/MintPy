@@ -1163,6 +1163,11 @@ def read_data4figure(i_start, i_end, inps, metadata):
         # reference pixel info for unwrapPhase
         if inps.dsetFamilyList[0].startswith('unwrapPhase') and inps.file_ref_yx:
             ref_data = readfile.read(inps.file, datasetName=dset_list, **ref_kwargs)[0]
+            # ref_data can come back 0-d / (1,) instead of (n,1,1): normalise to
+            # one reference value per date and broadcast when necessary
+            ref_data = np.asarray(ref_data).ravel()
+            if ref_data.size == 1 and data.shape[0] > 1:
+                ref_data = np.repeat(ref_data, data.shape[0])
             for i in range(data.shape[0]):
                 mask = data[i, :, :] != 0.
                 data[i, mask] -= ref_data[i]
