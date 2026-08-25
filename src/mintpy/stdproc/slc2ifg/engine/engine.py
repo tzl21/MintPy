@@ -857,10 +857,17 @@ class Engine:
 
                     # Resolve the coherence input from slc2ifg.unwrap.coh_type
                     # (auto|complex|phsig|none).  An explicit type validates
-                    # the chain and reports the missing stage; 'none' (or
-                    # 'auto' with no coherence stage) runs SNAPHU with
-                    # weight 1 (uniform).
+                    # the chain, but when the producing stage is *not* in the
+                    # chain (mid-chain entry / "run only unwrap") a matching
+                    # coherence raster already on disk is reused instead of
+                    # forcing regeneration.  'none' (or 'auto' with no
+                    # coherence available) runs SNAPHU with weight 1 (uniform).
                     coh_cfg = str(unwrap_coh_cfg or 'auto').lower()
+                    # expected on-disk rasters (used as the fallback below)
+                    phsig_existing = naming.coh_path(
+                        cur_base, d1, d2, cur_variant, 'phsig', self.processor)
+                    cpx_existing = naming.coh_path(
+                        self.ifgram_dir, d1, d2, 'fullres', 'cpx', self.processor)
                     if coh_cfg in ('phsig', 'complex', 'none'):
                         coh_type = coh_cfg
                     elif coh_cfg == 'auto':
@@ -868,6 +875,10 @@ class Engine:
                             coh_type = 'phsig'
                         elif cpx_path is not None and cur_variant == 'fullres':
                             coh_type = 'complex'
+                        elif cpx_existing.is_file() and cur_variant == 'fullres':
+                            coh_type = 'complex'   # reuse an existing complex coh
+                        elif phsig_existing.is_file():
+                            coh_type = 'phsig'     # reuse an existing phsig coh
                         else:
                             coh_type = 'none'
                     else:
@@ -878,25 +889,35 @@ class Engine:
                     coh_input: Optional[Path] = None
                     coh_node: Optional[str] = None
                     if coh_type == 'phsig':
-                        if ph_out is None:
+                        if ph_out is not None:
+                            coh_input, coh_node = ph_out[0], ph_out[1]
+                        elif phsig_existing.is_file():
+                            # mid-chain entry: reuse a pre-generated phsig raster
+                            coh_input, coh_node = phsig_existing, None
+                        else:
                             raise ValueError(
                                 f"unwrap: coh_type='phsig' but the "
                                 f"'phsig_coh' stage is missing from "
-                                f"engine.stages/tools (dp={dp})")
-                        coh_input, coh_node = ph_out[0], ph_out[1]
+                                f"engine.stages/tools (dp={dp}) and no "
+                                f"existing raster at {phsig_existing}")
                     elif coh_type == 'complex':
-                        if cpx_path is None:
-                            raise ValueError(
-                                f"unwrap: coh_type='complex' but the "
-                                f"'complex_coh' stage is missing from "
-                                f"engine.stages/tools (dp={dp})")
                         if cur_variant != 'fullres':
                             raise ValueError(
                                 f"unwrap: complex coherence is fullres-only "
                                 f"but the unwrapped variant is "
                                 f"'{cur_variant}' (dp={dp}) — use "
                                 f"coh_type='phsig' or run fullres")
-                        coh_input, coh_node = cpx_path, cpx_node
+                        if cpx_path is not None:
+                            coh_input, coh_node = cpx_path, cpx_node
+                        elif cpx_existing.is_file():
+                            # mid-chain entry: reuse a pre-generated complex coh
+                            coh_input, coh_node = cpx_existing, None
+                        else:
+                            raise ValueError(
+                                f"unwrap: coh_type='complex' but the "
+                                f"'complex_coh' stage is missing from "
+                                f"engine.stages/tools (dp={dp}) and no "
+                                f"existing raster at {cpx_existing}")
                     # 'none' -> coh_input stays None (SNAPHU weight = 1)
 
                     # Inject the *resolved* coherence type so the tool log
