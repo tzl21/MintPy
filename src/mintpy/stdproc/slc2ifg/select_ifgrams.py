@@ -107,9 +107,7 @@ DEFAULT_PARAMS: Dict[str, object] = {
     'coh_usable_threshold': 0.3,     # for stat='usable_frac'
     # measured weights from on-the-fly complex coherence on grid-sampled SLCs
     # (sampling: grid x grid windows of block x block px; no whole-image read)
-    'quick_nlks': 8,                 # legacy (accepted, unused — no full read)
     'quick_window': 5,               # coherence estimation window
-    'quick_max_pixels': 1_048_576,   # legacy (accepted, unused — no full read)
     'quick_grid': 12,                # sampling grid per side (12x12 windows)
     'quick_block': 16,               # sampled window size in pixels (16x16)
     'quick_debias': True,            # Touzi (1999) bias correction

@@ -117,7 +117,6 @@ class Engine:
 
         self.run_multilook = 'multilook' in config.tools
         self.run_filter = 'filter' in config.tools
-        self.run_complex_coh = config.run_complex_coh
         self.run_stitch = 'stitch' in config.tools
         self.run_unwrap = 'unwrap' in config.tools
 
@@ -563,9 +562,7 @@ class Engine:
                 ('coh_variant', 'str'),
                 ('coh_stat', 'str'),
                 ('coh_usable_threshold', 'float'),
-                ('quick_nlks', 'int'),
                 ('quick_window', 'int'),
-                ('quick_max_pixels', 'int'),
                 ('quick_max_workers', 'int'),
                 ('quick_debias', 'bool'),
                 ('min_degree', 'int'),
@@ -591,6 +588,16 @@ class Engine:
                 if not rp.is_absolute():
                     rp = (self.config.work_dir / rp).resolve()
                 p[out_key] = str(rp)
+        # legacy oneyear_interferograms -> annual_windows (365, range)
+        oneyear = get_int_opt(cfg, 'slc2ifg.ifgram_list.oneyear_interferograms')
+        if oneyear is not None:
+            logger.warning(
+                "slc2ifg.ifgram_list.oneyear_interferograms is deprecated; use "
+                "slc2ifg.ifgram_list.select.annual_windows=365:<range> instead")
+            aw = str(p.get('annual_windows') or '').strip().lower()
+            p['annual_windows'] = (f"365:{int(oneyear)}"
+                                   if aw in ('', 'auto', 'default')
+                                   else f"{aw},365:{int(oneyear)}")
         return p
 
     @staticmethod

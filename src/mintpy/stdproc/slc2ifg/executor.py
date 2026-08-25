@@ -199,12 +199,20 @@ class BasicExecutor(Slc2ifgExecutor):
                       'processor': self._opt('slc2ifg.processor', 'isce3')}
             for k in ('annual_windows', 'temp_baseline_max', 'perp_baseline_max',
                       'perp_baseline_file', 'weight_source', 'coh_dir',
-                      'coh_kind', 'coh_variant', 'coh_stat', 'quick_nlks',
-                      'quick_window', 'quick_max_pixels', 'min_degree',
+                      'coh_kind', 'coh_variant', 'coh_stat',
+                      'quick_window', 'min_degree',
                       'max_pairs', 'quality_threshold', 'robust', 'verify'):
                 cfgk = f'slc2ifg.ifgram_list.select.{k}'
                 if self._opt(cfgk) is not None:
                     params[k] = self._opt(cfgk)
+            if oneyear is not None:
+                logger.warning(
+                    "slc2ifg.ifgram_list.oneyear_interferograms is deprecated; "
+                    "use slc2ifg.ifgram_list.select.annual_windows=365:<range>")
+                aw = str(params.get('annual_windows') or '').strip().lower()
+                params['annual_windows'] = (f"365:{int(oneyear)}"
+                                            if aw in ('', 'auto', 'default')
+                                            else f"{aw},365:{int(oneyear)}")
             pairs, _ = select_pairs(dates, params=params)
         else:
             pairs = generate_pairs(dates, mode, nconn, oneyear)

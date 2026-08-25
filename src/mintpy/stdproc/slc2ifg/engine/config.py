@@ -13,7 +13,6 @@ The engine section controls scheduling/resources/product management:
 
     engine.tools = auto              # auto (default) or explicit tool list (authoritative — nothing is force-enabled)
     engine.stages = auto             # auto (default chain) or explicit stage list (exactly the listed stages run)
-    engine.run_complex_coh = auto    # auto -> respects explicit complex_coh listing (needs SLCs)
     engine.scheduler = auto          # threaded | distributed (auto -> threaded)
     engine.max_workers = auto        # task concurrency (default: n_cpu; single source of truth)
     engine.mem_limit_gb = auto       # host memory budget (default: 80%)
@@ -200,9 +199,6 @@ AUTO_TOOLS = [
     'unwrap',
 ]
 
-#: Optional tools never enabled by 'auto'
-OPTIONAL_TOOLS = ['complex_coh', 'crop_slc', 'atmosphere']
-
 
 @dataclass
 class EngineConfig:
@@ -218,7 +214,6 @@ class EngineConfig:
 
     # --- tools ---
     tools: List[str] = field(default_factory=list)
-    run_complex_coh: bool = False
     #: engine.stages — explicit processing chain (None = built-in default)
     stages: Optional[List[str]] = None
 
@@ -305,38 +300,26 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
     if not slc_input:
         raise ValueError("Missing required configuration: slc2ifg.slc_input")
 
-    # --- engine section ---
-    tools_cfg = get_opt(config, 'engine.tools', fallback='auto')
-    run_cpx = get_opt(config, 'engine.run_complex_coh', fallback='auto')
-
-    tools: List[str] = []
-    if tools_cfg == 'auto' or not tools_cfg:
-        tools = list(AUTO_TOOLS)
-    else:
-        tools = [t.strip() for t in tools_cfg.split(',') if t.strip()]
-
-    if run_cpx in ('true', 'True', '1', 'yes'):
-        run_complex_coh = True
-        if 'complex_coh' not in tools:
-            tools.append('complex_coh')
-    elif run_cpx in ('false', 'False', '0', 'no'):
-        run_complex_coh = False
-        tools = [t for t in tools if t != 'complex_coh']
-    else:
-        # auto: respect the explicit engine.tools list — listing
-        # complex_coh explicitly enables it (it still requires SLC inputs,
-        # enforced at graph build in mid-chain entry mode).
-        run_complex_coh = 'complex_coh' in tools
-
-    # 'auto' never enables optional tools
-    if tools_cfg == 'auto' or not tools_cfg:
-        tools = [t for t in tools if t not in OPTIONAL_TOOLS]
-
-    # --- processing chain (engine.stages) ---
+    # --- engine section: processing chain ---
+    # engine.stages is the single authoritative chain spec.  The legacy
+    # engine.tools key is a deprecated alias (warned and mapped to stages).
     stages_cfg = get_opt(config, 'engine.stages', fallback=None)
     stages: Optional[List[str]] = None
     if stages_cfg:
         stages = [s.strip() for s in stages_cfg.split(',') if s.strip()]
+    else:
+        tools_cfg = get_opt(config, 'engine.tools', fallback=None)
+        if tools_cfg and str(tools_cfg).strip().lower() not in ('auto', ''):
+            logger.warning(
+                "engine.tools is deprecated; use engine.stages instead")
+            stages = [t.strip() for t in str(tools_cfg).split(',') if t.strip()]
+
+    # tools whitelist (drives engine.py run_* / entry-mode flags): derived
+    # from the explicit chain, else the lean AUTO_TOOLS default.
+    if stages is not None:
+        tools = list(stages)
+    else:
+        tools = list(AUTO_TOOLS)
 
     engine_work = get_opt(config, 'engine.work_dir', fallback=str(work_path / 'engine'))
     engine_work_path = Path(engine_work)
@@ -363,7 +346,6 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
         ifg_pattern=ifg_pattern,
         cor_pattern=cor_pattern,
         tools=tools,
-        run_complex_coh=run_complex_coh,
         stages=stages,
         scheduler=get_opt(config, 'engine.scheduler', fallback='threaded') or 'threaded',
         # engine.max_workers is the single concurrency knob (legacy
