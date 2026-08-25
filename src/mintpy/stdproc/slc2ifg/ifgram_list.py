@@ -44,6 +44,49 @@ def register_pair_generator(mode_name):
     return decorator
 
 
+def _window_pairs(date_list, windows):
+    """Pairs ``(d1, d2)`` (``d1 < d2``) whose temporal baseline falls within
+    any ``(center, tol)`` window."""
+    if not windows:
+        return set()
+    dts = {d: datetime.strptime(d, '%Y%m%d') for d in date_list}
+    dl = sorted(date_list)
+    pairs = set()
+    for i in range(len(dl)):
+        for j in range(i + 1, len(dl)):
+            dt = (dts[dl[j]] - dts[dl[i]]).days
+            if any(abs(dt - c) <= t for c, t in windows):
+                pairs.add((dl[i], dl[j]))
+    return pairs
+
+
+def _resolve_window_pairs(date_list, oneyear_range=None, select_params=None):
+    """Annual-window pairs from the unified ``annual_windows`` spec.
+
+    ``select_params['annual_windows']`` is the canonical spec (``auto`` |
+    ``none`` | ``center:tol,...``).  The legacy ``oneyear_range``
+    (``slc2ifg.ifgram_list.oneyear_interferograms``) is mapped to an extra
+    ``(365, range)`` window with a deprecation warning.
+    """
+    from .select_ifgrams import auto_annual_windows, parse_annual_windows
+    windows = []
+    aw = (select_params or {}).get('annual_windows')
+    if aw is not None:
+        v = str(aw).strip().lower()
+        if v in ('auto', 'default', ''):
+            windows.extend(auto_annual_windows(date_list))
+        elif v not in ('none', 'off', '0', 'disable'):
+            parsed = parse_annual_windows(aw)
+            windows.extend(parsed if parsed is not None
+                           else auto_annual_windows(date_list))
+    if oneyear_range is not None:
+        logger.warning(
+            "slc2ifg.ifgram_list.oneyear_interferograms is deprecated; use "
+            "slc2ifg.ifgram_list.select.annual_windows=365:<range> instead")
+        windows.append((365, int(oneyear_range)))
+    return _window_pairs(date_list, windows)
+
+
 @register_pair_generator('sequential')
 def generate_sequential_pairs(date_list, num_connections, oneyear_range=None,
                               select_params=None):
@@ -70,11 +113,11 @@ def generate_sequential_pairs(date_list, num_connections, oneyear_range=None,
     
     logger.info(f"Generated {len(pairs)} pairs from {num_connections} nearest neighbor connections")
     
-    # Generate one-year interferograms if requested
-    if oneyear_range is not None:
-        oneyear_pairs = generate_oneyear_pairs(date_list, oneyear_range)
-        pairs.update(oneyear_pairs)
-        logger.info(f"Added {len(oneyear_pairs)} one-year pairs, total: {len(pairs)} pairs")
+    # Annual-window interferograms (unified annual_windows spec)
+    win_pairs = _resolve_window_pairs(date_list, oneyear_range, select_params)
+    if win_pairs:
+        pairs.update(win_pairs)
+        logger.info(f"Added {len(win_pairs)} annual-window pairs, total: {len(pairs)} pairs")
     
     return sorted(pairs)
 
@@ -112,11 +155,11 @@ def generate_reference_pairs(date_list, num_connections=None, oneyear_range=None
     
     logger.info(f"Generated {len(pairs)} reference pairs")
     
-    # Generate one-year interferograms if requested
-    if oneyear_range is not None:
-        oneyear_pairs = generate_oneyear_pairs(date_list, oneyear_range)
-        pairs.update(oneyear_pairs)
-        logger.info(f"Added {len(oneyear_pairs)} one-year pairs, total: {len(pairs)} pairs")
+    # Annual-window interferograms (unified annual_windows spec)
+    win_pairs = _resolve_window_pairs(date_list, oneyear_range, select_params)
+    if win_pairs:
+        pairs.update(win_pairs)
+        logger.info(f"Added {len(win_pairs)} annual-window pairs, total: {len(pairs)} pairs")
     
     return sorted(pairs)
 
@@ -187,6 +230,16 @@ def generate_select_pairs(date_list, num_connections=None, oneyear_range=None,
     params = dict(select_params or {})
     if num_connections is not None and 'num_connections' not in params:
         params['num_connections'] = num_connections
+    # legacy oneyear_interferograms -> annual_windows (365, range)
+    if oneyear_range is not None:
+        logger.warning(
+            "slc2ifg.ifgram_list.oneyear_interferograms is deprecated; use "
+            "slc2ifg.ifgram_list.select.annual_windows=365:<range> instead")
+        aw = str(params.get('annual_windows') or '').strip().lower()
+        if aw in ('', 'auto', 'default'):
+            params['annual_windows'] = f"365:{int(oneyear_range)}"
+        else:
+            params['annual_windows'] = f"{aw},365:{int(oneyear_range)}"
     slc_dir = params.pop('slc_dir', None)
     processor = params.pop('processor', 'isce3')
     pairs, report = select_pairs(date_list, slc_dir=slc_dir,
@@ -315,15 +368,9 @@ def create_parser():
     select_group.add_argument('--select-coh-usable-threshold', dest='select_coh_usable_threshold',
                              type=float, default=None,
                              help='Threshold for stat=usable_frac (default: 0.3)')
-    select_group.add_argument('--select-quick-nlks', dest='select_quick_nlks',
-                             type=int, default=None,
-                             help='Downsampling factor for quick coherence (default: 8)')
     select_group.add_argument('--select-quick-window', dest='select_quick_window',
                              type=int, default=None,
                              help='Coherence window for quick coherence (default: 5)')
-    select_group.add_argument('--select-quick-max-pixels', dest='select_quick_max_pixels',
-                             type=int, default=None,
-                             help='Cap on the downsampled SLC size (default: 1048576)')
     select_group.add_argument('--select-quick-debias', dest='select_quick_debias',
                              type=_str2bool, metavar='{true,false}', default=None,
                              help='Touzi bias correction for quick coherence (default: true)')
@@ -563,9 +610,7 @@ def _select_params_from_args(args):
         ('select_coh_variant', 'coh_variant'),
         ('select_coh_stat', 'coh_stat'),
         ('select_coh_usable_threshold', 'coh_usable_threshold'),
-        ('select_quick_nlks', 'quick_nlks'),
         ('select_quick_window', 'quick_window'),
-        ('select_quick_max_pixels', 'quick_max_pixels'),
         ('select_quick_max_workers', 'quick_max_workers'),
         ('select_model_tau_days', 'model_tau_days'),
         ('select_model_gamma0', 'model_gamma0'),

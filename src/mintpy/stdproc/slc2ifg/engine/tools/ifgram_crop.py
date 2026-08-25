@@ -55,9 +55,7 @@ class IfgramListTool(Tool):
             ('coh_variant', 'str'),
             ('coh_stat', 'str'),
             ('coh_usable_threshold', 'float'),
-            ('quick_nlks', 'int'),
             ('quick_window', 'int'),
-            ('quick_max_pixels', 'int'),
             ('quick_max_workers', 'int'),
             ('quick_debias', 'bool'),
             ('min_degree', 'int'),
@@ -97,6 +95,16 @@ class IfgramListTool(Tool):
             params.setdefault('num_connections', 3)
             params['slc_dir'] = str(ctx.input('slc_dir'))
             params['processor'] = ctx.param('processor', 'isce3')
+            # legacy oneyear_interferograms -> annual_windows (365, range)
+            oyr = ctx.param('oneyear_interferograms')
+            if oyr is not None:
+                ctx.logger.warning(
+                    "slc2ifg.ifgram_list.oneyear_interferograms is deprecated; "
+                    "use slc2ifg.ifgram_list.select.annual_windows=365:<range>")
+                aw = str(params.get('annual_windows') or '').strip().lower()
+                params['annual_windows'] = (f"365:{int(oyr)}"
+                                            if aw in ('', 'auto', 'default')
+                                            else f"{aw},365:{int(oyr)}")
             if params.get('report_file'):
                 rp = Path(params['report_file'])
                 if not rp.is_absolute():

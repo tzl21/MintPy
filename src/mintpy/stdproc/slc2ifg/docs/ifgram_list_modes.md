@@ -9,7 +9,7 @@ Three modes exist, selected by `slc2ifg.ifgram_list.mode`
 
 | mode | name | edges | quality-aware | long baselines | when to use |
 |---|---|---|---|---|---|
-| `sequential` | k temporal nearest neighbours | ≈ k·N | no | only via `oneyear_interferograms` | simple, dense short-baseline network |
+| `sequential` | k temporal nearest neighbours | ≈ k·N | no | only via `annual_windows` (one-year = `365:<range>`) | simple, dense short-baseline network |
 | `reference` | star network (single master) | N−1 | no | long for late dates | tiny stacks / stable targets / pilot runs |
 | `select` | coherence-aware connected selection | tunable (default ≈ 1.5·N) | **yes** | yes (annual windows) | the recommended default for production SBAS |
 
@@ -59,7 +59,7 @@ The network is the **k-th power of the temporal path graph**.
 | key | default | effect |
 |---|---|---|
 | `num_connections` | `5` | `k`. `k ≥ N−1` degenerates to the complete graph. |
-| `oneyear_interferograms` | — | additionally emit every pair whose baseline is within ±N days of 365 days (see `generate_oneyear_pairs`). |
+| `annual_windows` | `auto` | additionally emit every pair whose baseline is within any `center:tol` window (e.g. one-year = `365:<range>`). Canonical knob for annual/one-year pairs in every mode (the legacy `oneyear_interferograms` is a deprecated alias). |
 | `start_date` / `end_date` | — | dates outside `[start, end]` are dropped *before* pairing (also filters the crop file list). |
 
 ### 1.5 When to use
@@ -98,7 +98,7 @@ other date:
 
 ### 2.4 Parameters
 
-Same `start_date` / `end_date` / `oneyear_interferograms` as
+Same `start_date` / `end_date` / `annual_windows` as
 `sequential` (`num_connections` is ignored).
 
 ### 2.5 When to use
@@ -195,9 +195,9 @@ A missing raster yields weight 0 in `coherence` mode, or a model
 fallback in `mixed` mode (warned in the log).
 
 **`coherence` quick (on-the-fly) details** — the "screening" source:
-each SLC is block-averaged down to at most `quick_max_pixels`
-(default 1 048 576; factor = `max(quick_nlks, √(rows·cols/max_pixels))`,
-default `quick_nlks = 8`), the complex correlation magnitude is computed
+each SLC is read as a regular `quick_grid`×`quick_grid` grid of
+`quick_block`×`quick_block` sample windows (0.04% of the pixels, no
+whole-image read), the complex correlation magnitude is computed
 with a `quick_window`×`quick_window` boxcar (default 5), corrected for
 the magnitude bias (`quick_debias`, default on; Touzi 1999 with
 `L = (factor·window)²` effective looks:
@@ -324,7 +324,8 @@ window-pair rule.)
 | `model_tau_days` / `model_gamma0` | `90` / `1.0` | temporal-decorrelation model. |
 | `coh_dir` / `coh_kind` / `coh_variant` | — / `phsig` / `filt_mli` | existing-coherence source. |
 | `coh_stat` / `coh_usable_threshold` | `mean` / `0.3` | raster aggregation. |
-| `quick_nlks` / `quick_window` / `quick_max_pixels` / `quick_debias` | `8` / `5` / `1048576` / `true` | on-the-fly coherence. |
+| `quick_window` / `quick_debias` | `5` / `true` | on-the-fly coherence boxcar / Touzi bias correction. |
+| `quick_grid` / `quick_block` | `12` / `16` | on-the-fly grid sampling density. |
 | `quick_max_workers` | `1` | threads for the per-pair quick-coherence screening. |
 | `quick_stat` / `quick_usable_threshold` | `mean` / `0.3` | quick aggregation. |
 | `min_degree` | `2` | minimum interferograms per date (0/1 = spanning tree only). |

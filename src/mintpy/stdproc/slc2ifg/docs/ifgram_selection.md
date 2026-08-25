@@ -152,9 +152,9 @@ Implemented in `select_ifgrams.select_ifgrams`; orchestrated by
 * **"fully connected on a small window / downsampled SLCs"** —
   `num_connections = 0`, `annual_windows = none`, `temp_baseline_max = N`
   (or any window), then let `weight_source = coherence` with the
-  on-the-fly quick coherence: every candidate is screened on SLCs
-  block-averaged down to ~1 Mpixel (`quick_nlks`, `quick_window`,
-  `quick_max_pixels`), which costs milliseconds per pair, and the
+  on-the-fly quick coherence: every candidate is screened on a grid
+  sample of the SLCs (`quick_grid`×`quick_grid` of `quick_block`×
+  `quick_block` windows), which costs milliseconds per pair, and the
   selection keeps only the high-coherence ones. For large `N`, prefer
   capping `temp_baseline_max` so the `N(N-1)/2` candidate set stays
   manageable.
@@ -220,7 +220,7 @@ slc2ifg.ifgram_list.select.report = ifgram_selection.json
 # slc2ifg.ifgram_list.num_connections = 3
 # slc2ifg.ifgram_list.select.annual_windows = 182:10,365:15   # or auto (default)
 # slc2ifg.ifgram_list.select.temp_baseline_max = 60
-# slc2ifg.ifgram_list.select.quick_nlks = 8
+# slc2ifg.ifgram_list.select.quick_window = 5
 # slc2ifg.ifgram_list.select.max_pairs = 300
 # slc2ifg.ifgram_list.select.quality_threshold = 0.3
 ```
