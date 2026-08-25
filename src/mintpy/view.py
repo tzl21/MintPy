@@ -1329,6 +1329,7 @@ def plot_subplot4figure(i, inps, ax, data, metadata):
             print_msg=inps.print_msg)
 
     # Plot Data
+    plot_satellite_background(ax, inps)   # satellite/background under the data
     vlim = inps.vlim if inps.vlim is not None else [np.nanmin(data), np.nanmax(data)]
     if (getattr(inps, 'sat_rgb', None) is not None
             and getattr(inps, 'geo_box', None)):
