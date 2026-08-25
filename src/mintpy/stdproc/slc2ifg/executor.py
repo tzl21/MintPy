@@ -198,7 +198,7 @@ class BasicExecutor(Slc2ifgExecutor):
                       'slc_dir': str(slc_dir),
                       'processor': self._opt('slc2ifg.processor', 'isce3')}
             for k in ('annual_windows', 'temp_baseline_max', 'perp_baseline_max',
-                      'perp_baseline_file', 'weight_source', 'coh_dir',
+                      'perp_baseline_file', 'weight_source', 'slc_pattern', 'coh_dir',
                       'coh_kind', 'coh_variant', 'coh_stat',
                       'quick_window', 'min_degree',
                       'max_pairs', 'quality_threshold', 'robust', 'verify'):
