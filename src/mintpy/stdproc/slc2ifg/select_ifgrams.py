@@ -35,11 +35,11 @@ whose design matrix ``H`` is the oriented incidence matrix of ``G'``
    one — and (b) robustness to a single failed (unwrapped) edge.
 
 3. **Consequence.**  The near-optimal strategy is to *span the network
-   with the highest-quality edges and then greedily augment with the
-   highest-quality remaining edges*: this is what this module implements
-   (maximum spanning tree + greedy augmentation, with optional per-date
-   minimum degree, an edge budget, a quality floor, and bridge repair for
-   2-edge robustness where the candidate set allows).
+   with the highest-quality edges and then greedily augment to maximise
+   the **mean** (average) quality*: this is what this module implements
+   (maximum spanning tree + mean-maximising augmentation, with optional
+   per-date minimum degree, an edge budget, a quality floor, and bridge
+   repair for 2-edge robustness where the candidate set allows).
 
 Algorithm (``select_ifgrams``)
 ------------------------------
@@ -54,8 +54,9 @@ Algorithm (``select_ifgrams``)
 3. ``select_ifgrams`` —
    a. maximum spanning tree (Kruskal, highest weight first) — guarantees
       connectivity with exactly ``N-1`` edges;
-   b. greedy min-degree augmentation (every date in >= ``min_degree``
-      interferograms, highest weight first);
+   b. mean-maximising augmentation (every date in >= ``min_degree``
+      interferograms; keeps edges at or above the running mean so the
+      average coherence is maximised);
    c. optional budget fill with the highest-quality remaining edges;
    d. optional bridge repair (2-edge robustness where possible).
 4. ``verify_selection`` — re-checks connectivity and the full-rank
@@ -789,6 +790,67 @@ def quick_coherence_weights(
 # ------------------------------------------------------------------------
 # Selection
 # ------------------------------------------------------------------------
+def _mean_weight(selected: Iterable[Tuple[str, str]],
+                 weights: Dict[Tuple[str, str], float]) -> float:
+    """Mean quality weight of ``selected`` (0.0 when empty)."""
+    if not selected:
+        return 0.0
+    return float(np.mean([weights[p] for p in selected]))
+
+
+def _max_mean_augment(
+    dates: Sequence[str],
+    selected: Set[Tuple[str, str]],
+    degree: Dict[str, int],
+    order: Sequence[Tuple[str, str]],
+    weights: Dict[Tuple[str, str], float],
+    min_degree: int,
+    max_pairs: Optional[int],
+    thresh: float,
+) -> Tuple[Set[Tuple[str, str]], Dict[str, int]]:
+    """Greedy mean-maximising augmentation toward a min-degree network.
+
+    Starting from the (already selected) max-weight spanning tree, edges are
+    considered in descending weight.  An unselected edge at or above ``thresh``
+    is added when it either
+
+    * is **required** to lift one of its endpoints to ``min_degree``, or
+    * is **not below the current running mean** (adding it can never lower
+      the average coherence),
+
+    and the running mean is refreshed after each full sweep, repeating to a
+    fixed point.  The final set therefore keeps *every* edge at or above the
+    converged mean (these only raise the average) plus the few below-mean
+    edges forced by the connectivity / ``min_degree`` lower bound — i.e. the
+    maximum-mean selection for this skeleton, not merely the maximum-sum one.
+    ``max_pairs`` caps the total edge count (hard budget).
+    """
+    selected = set(selected)
+    degree = dict(degree)
+    while True:
+        mu = _mean_weight(selected, weights)
+        if max_pairs is not None and len(selected) >= max_pairs:
+            break
+        added_any = False
+        for a, b in order:
+            if (a, b) in selected:
+                continue
+            if max_pairs is not None and len(selected) >= max_pairs:
+                break
+            if weights[(a, b)] < thresh:
+                continue
+            need = degree[a] < min_degree or degree[b] < min_degree
+            if not need and weights[(a, b)] < mu:
+                continue
+            selected.add((a, b))
+            degree[a] += 1
+            degree[b] += 1
+            added_any = True
+        if not added_any:
+            break
+    return selected, degree
+
+
 def select_ifgrams(
     dates: Sequence[str],
     candidates: Sequence[Tuple[str, str]],
@@ -808,8 +870,10 @@ def select_ifgrams(
       graph itself is disconnected (no connected subset exists).
     * **Quality priority** — the ``N-1`` tree edges form the
       *maximum-weight spanning tree* (highest total weight among all
-      spanning trees), and augmentation proceeds strictly by descending
-      weight.
+      spanning trees).  Augmentation then maximises the *mean* (average)
+      edge weight, not the sum: it adds any edge that is at or above the
+      running mean coherence, and only the few below-mean edges that are
+      forced by the ``min_degree`` lower bound.
     * **min_degree** — every date ends up in at least ``min_degree``
       selected interferograms *when the (above-threshold) candidates allow
       it*; otherwise a warning lists the unmet dates.
@@ -875,21 +939,17 @@ def select_ifgrams(
     max_pairs = int(max_pairs) if max_pairs else None
     thresh = float(quality_threshold) if quality_threshold is not None else 0.0
 
-    # --- Phase 2a: min-degree augmentation (highest weight first) ---------
+    # --- Phase 2a: max-mean augmentation (degree >= min_degree) -----------
+    # Objective: maximise the *average* (mean) coherence of the selected
+    # network while keeping every date at degree >= min_degree.  Starting
+    # from the max-weight spanning tree, edges are added in descending
+    # weight when they either lift a node to min_degree or are not below the
+    # current running mean (they cannot lower the average).  This keeps the
+    # high-coherence edges and only the few low edges forced by the degree
+    # lower bound — see _max_mean_augment.
     if min_degree > 1:
-        for p in order:
-            if all(v >= min_degree for v in degree.values()):
-                break
-            if p in selected:
-                continue
-            a, b = p
-            if degree[a] >= min_degree and degree[b] >= min_degree:
-                continue
-            if w[p] < thresh:
-                continue
-            selected.add(p)
-            degree[a] += 1
-            degree[b] += 1
+        selected, degree = _max_mean_augment(
+            dates, selected, degree, order, w, min_degree, max_pairs, thresh)
         unmet = [d for d in dates if degree[d] < min_degree]
         if unmet:
             logger.warning(
@@ -936,6 +996,7 @@ def select_ifgrams(
         'n_bridge_repairs': repaired,
         'tree_weight_sum': round(float(sum(w[p] for p in tree)), 6),
         'selected_weight_sum': round(float(sum(sw)), 6),
+        'selected_weight_mean': round(float(np.mean(sw)), 6) if sw else None,
         'min_selected_weight': round(float(min(sw)), 6) if sw else None,
         'median_selected_weight': round(float(np.median(sw)), 6) if sw else None,
         'min_degree_target': min_degree,
