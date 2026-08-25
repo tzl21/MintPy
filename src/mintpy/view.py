@@ -556,6 +556,7 @@ def plot_slice(ax, data, metadata, inps):
             inps.disp_ref_pixel = False
 
         # Plot data
+        plot_satellite_background(ax, inps)   # satellite/background under the data
         if inps.disp_dem_blend:
             im = pp.plot_blend_image(ax, data, dem, inps, print_msg=inps.print_msg)
 
@@ -1233,6 +1234,73 @@ def read_data4figure(i_start, i_end, inps, metadata):
     return data
 
 
+def prep_satellite_background(inps, atr):
+    """Read a georeferenced background image (e.g. satellite) and warp it to
+    the data's display CRS.  Stores ``inps.sat_rgb`` (RGB array) and
+    ``inps.sat_extent`` (W, E, S, N in the display CRS); sets both to None when
+    no ``--background`` is given or the data is in radar coordinates.
+    """
+    inps.sat_rgb = None
+    inps.sat_extent = None
+    bg = getattr(inps, 'background', None)
+    if not bg:
+        return
+
+    # radar-coordinate data has no display CRS to place a geo background on
+    if not getattr(inps, 'geo_box', None) or getattr(inps, 'fig_coord', None) != 'geo':
+        vprint('WARNING: --background is only supported for geo-coordinate data; ignored.')
+        return
+
+    from osgeo import gdal, osr
+    from mintpy.utils import readfile as rf
+
+    sat, sat_atr = rf.read(bg, print_msg=False)
+    if sat.ndim == 2:                       # single-band -> gray
+        sat = np.stack([sat]*3, axis=-1)
+    elif sat.ndim == 3 and sat.shape[2] >= 3:
+        sat = sat[:, :, :3]
+    h, w = sat.shape[:2]
+
+    # target display CRS
+    coord_unit = str(getattr(inps, 'coord_unit', 'deg') or 'deg')
+    dst_epsg = 4326 if coord_unit.startswith('deg') else int(atr['EPSG'])
+
+    # build in-memory source in its native CRS
+    if 'Y_FIRST' in sat_atr:
+        x0, y0 = float(sat_atr['X_FIRST']), float(sat_atr['Y_FIRST'])
+        dx, dy = float(sat_atr['X_STEP']), float(sat_atr['Y_STEP'])
+    else:
+        x0, y0, dx, dy = 0., 0., 1., 1.
+    gt = (x0, dx, 0, y0, 0, dy)
+    ds = gdal.GetDriverByName('MEM').Create('', w, h, 3, gdal.GDT_Byte)
+    ds.SetGeoTransform(gt)
+    if 'PROJECTION' in sat_atr:
+        ds.SetProjection(sat_atr['PROJECTION'])
+    else:
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        ds.SetProjection(srs.ExportToWkt())
+    for b in range(3):
+        ds.GetRasterBand(b+1).WriteArray(sat[:, :, b].astype(np.uint8))
+
+    gdal.UseExceptions()
+    out = gdal.Warp('', ds, dstSRS=f'EPSG:{dst_epsg}', format='MEM', resampleAlg='bilinear')
+    ogt = out.GetGeoTransform()
+    ow, oh = out.RasterXSize, out.RasterYSize
+    rgb = np.dstack([out.GetRasterBand(b+1).ReadAsArray() for b in range(3)])
+    inps.sat_rgb = rgb
+    inps.sat_extent = (ogt[0], ogt[0] + ogt[1]*ow, ogt[3] + ogt[5]*oh, ogt[3])  # W, E, S, N
+    vprint(f'background image warped to EPSG:{dst_epsg}: {ow}x{oh}')
+
+
+def plot_satellite_background(ax, inps):
+    """Plot the prepared satellite background under the data."""
+    if getattr(inps, 'sat_rgb', None) is None:
+        return
+    ax.imshow(inps.sat_rgb, extent=inps.sat_extent, zorder=getattr(inps, 'background_zorder', 0),
+              alpha=getattr(inps, 'background_alpha', 1.0), interpolation='nearest')
+
+
 def plot_subplot4figure(i, inps, ax, data, metadata):
     """Plot one subplot for one 3D array
     1) Plot DEM, data and reference pixel
@@ -1251,8 +1319,13 @@ def plot_subplot4figure(i, inps, ax, data, metadata):
 
     # Plot Data
     vlim = inps.vlim if inps.vlim is not None else [np.nanmin(data), np.nanmax(data)]
-    inps.extent = (inps.pix_box[0]-0.5, inps.pix_box[2]-0.5,
-                   inps.pix_box[3]-0.5, inps.pix_box[1]-0.5)
+    if (getattr(inps, 'sat_rgb', None) is not None
+            and getattr(inps, 'geo_box', None)):
+        # geo display so the satellite background aligns (same convention as plot_slice)
+        inps.extent = (inps.geo_box[0], inps.geo_box[2], inps.geo_box[3], inps.geo_box[1])
+    else:
+        inps.extent = (inps.pix_box[0]-0.5, inps.pix_box[2]-0.5,
+                       inps.pix_box[3]-0.5, inps.pix_box[1]-0.5)
     im = ax.imshow(data, cmap=inps.colormap, vmin=vlim[0], vmax=vlim[1],
                    interpolation=inps.interpolation, alpha=inps.transparency,
                    extent=inps.extent, zorder=1)
@@ -1584,6 +1657,9 @@ class viewer():
 
         inps, self.atr = read_input_file_info(inps)
         inps = update_inps_with_file_metadata(inps, self.atr)
+
+        # prepare satellite/background image (warped to the display CRS)
+        prep_satellite_background(inps, self.atr)
 
         # --update option
         self.flag = 'run'

@@ -547,3 +547,15 @@ def add_timefunc_argument(parser):
                             '                                       # 2nd log w/ onset at 2019-01-25       w/ tau=180 days\n')
 
     return parser
+
+
+def add_background_argument(parser):
+    """Argument group parser for background-image (e.g. satellite) display options"""
+    bg = parser.add_argument_group('Background', 'Plot a georeferenced image (e.g. satellite) under the data')
+    bg.add_argument('--background', dest='background', type=str, metavar='FILE',
+                    help='GeoTIFF background image (e.g. satellite imagery) to plot under the data')
+    bg.add_argument('--background-alpha', dest='background_alpha', type=float, default=1.0,
+                    metavar='NUM', help='transparency of the background image (default: %(default)s, 0-1).')
+    bg.add_argument('--background-zorder', dest='background_zorder', type=float, default=0,
+                    metavar='NUM', help='zorder of the background image (default: %(default)s, below the data).')
+    return parser

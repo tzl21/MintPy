@@ -94,6 +94,7 @@ def create_parser(subparsers=None):
     parser = arg_utils.add_reference_argument(parser)
     parser = arg_utils.add_save_argument(parser)
     parser = arg_utils.add_subset_argument(parser)
+    parser = arg_utils.add_background_argument(parser)
 
     return parser
 
