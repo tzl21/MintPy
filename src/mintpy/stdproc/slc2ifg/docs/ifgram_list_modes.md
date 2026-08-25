@@ -227,16 +227,21 @@ trees — the maximum total weight (this is exact, not a heuristic). If
 the candidate graph is itself disconnected, a `ValueError` is raised
 with hints (relax `temp_baseline_max`, raise `num_connections`).
 
-**Phase B — min-degree augmentation** (`min_degree`, default **2**):
-continue down the order, adding an edge whenever one of its endpoints
-still has degree `< min_degree`, until every date reaches the target (or
-the list ends). Why: tree leaves (degree 1) estimate their phase from a
-single interferogram — the noisiest possible — and a single unwrap
-failure disconnects them. `min_degree = 2` gives every date ≥ 2
-interferograms. `min_degree = 1` disables this phase (pure spanning
-tree, `N−1` pairs — the absolute minimum). If the target cannot be met
-(candidates too sparse or below the quality floor), the unmet dates are
-warned and listed in the report.
+**Phase B — max-mean augmentation** (`min_degree`, default **2**):
+continuing down the order, an edge is added whenever it either lifts one
+of its endpoints to the `min_degree` target, or its weight is **at or
+above the current running mean** (adding it can never lower the average
+coherence).  The running mean is refreshed after each sweep and the
+sweep repeats to a fixed point.  The objective is the *mean* (average)
+coherence, not the sum: the final network keeps every edge at or above
+the converged mean plus only the few below-mean edges forced by the
+connectivity / `min_degree` lower bound.  Why `min_degree`: tree leaves
+(degree 1) estimate their phase from a single interferogram — the
+noisiest possible — and a single unwrap failure disconnects them.
+`min_degree = 2` gives every date ≥ 2 interferograms. `min_degree = 1`
+disables this phase (pure spanning tree, `N−1` pairs — the absolute
+minimum). If the target cannot be met (candidates too sparse or below
+the quality floor), the unmet dates are warned and listed in the report.
 
 **Phase C — budget fill** (`max_pairs`): if the current count is below
 `max_pairs`, keep adding the highest-weight remaining edges (still
@@ -264,7 +269,7 @@ warning is logged when that happens.
   connected).
 * With `select.report` set, a JSON report is written: counts
   (`n_candidates`, `n_selected`, `n_tree_edges`, `n_bridge_repairs`),
-  weight statistics (sums, min/median), degree statistics
+  weight statistics (sum, mean, min/median), degree statistics
   (`min_degree_actual`, `max_degree_actual`, `degree_unmet`),
   verification (`connected`, `rank`, `full_rank`), the tree edge list
   (`tree_edges`, for the diagram), `weight_source` and a full parameter

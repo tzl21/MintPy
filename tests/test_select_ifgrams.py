@@ -19,6 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from mintpy.stdproc.slc2ifg.select_ifgrams import (
+    _kruskal_max,
     aggregate_coherence,
     check_connected,
     design_matrix,
@@ -320,6 +321,66 @@ def test_quality_priority():
                              max_pairs=len(DATES) + 1)
     assert len(sel2) == len(DATES) + 1
     assert all(p not in sel2 for p in low)
+
+
+def _old_total_greedy(dates, cand, weights, min_degree):
+    """Replica of the pre-mean-optimisation augmentation (tree + stop at
+    min_degree), used to prove the new mean objective never regresses."""
+    order = sorted(cand, key=lambda p: (-weights[p], p[0], p[1]))
+    tree = _kruskal_max(dates, order, weights)
+    selected = set(tree)
+    deg = {d: 0 for d in dates}
+    for a, b in selected:
+        deg[a] += 1
+        deg[b] += 1
+    for p in order:
+        if all(v >= min_degree for v in deg.values()):
+            break
+        if p in selected:
+            continue
+        a, b = p
+        if deg[a] >= min_degree and deg[b] >= min_degree:
+            continue
+        selected.add(p)
+        deg[a] += 1
+        deg[b] += 1
+    return selected
+
+
+def test_max_mean_priority_over_total():
+    """Given min_degree, selection maximises the *mean* coherence (not the
+    total): it keeps adding above-mean edges even after every date already
+    reaches min_degree.  The mean must never be lower than the old
+    total-greedy, connectivity and degree>=min_degree must hold, and on a
+    crafted case an above-mean edge that is not needed for min_degree must
+    still be kept."""
+    # random instances: new mean >= old mean, constraints preserved
+    for seed in range(12):
+        cand = generate_candidates(DATES, num_connections=3, annual_windows=())
+        w = _random_weights(DATES, cand, seed=seed)
+        sel, rep = select_ifgrams(DATES, cand, w, min_degree=2)
+        old = _old_total_greedy(DATES, cand, w, 2)
+        assert check_connected(DATES, sel)
+        assert rep['min_degree_actual'] >= 2
+        new_mean = float(np.mean([w[p] for p in sel]))
+        old_mean = float(np.mean([w[p] for p in old]))
+        assert new_mean >= old_mean - 1e-9, \
+            f"seed={seed}: new mean {new_mean} < old {old_mean}"
+
+    # crafted case: an above-mean edge is kept even though every date already
+    # reached degree 2 without it (old greedy dropped it -> lower mean)
+    dates = ['20240101', '20240113', '20240125', '20240206', '20240218']
+    cand = list(itertools.combinations(dates, 2))
+    w = {('20240101', '20240113'): 0.90, ('20240101', '20240125'): 0.86,
+         ('20240101', '20240206'): 0.90, ('20240101', '20240218'): 0.10,
+         ('20240113', '20240125'): 0.80, ('20240113', '20240206'): 0.88,
+         ('20240113', '20240218'): 0.10, ('20240125', '20240206'): 0.85,
+         ('20240125', '20240218'): 0.10, ('20240206', '20240218'): 0.10}
+    sel, rep = select_ifgrams(dates, cand, w, min_degree=2)
+    assert ('20240113', '20240125') in sel  # above-mean edge (0.80) kept
+    assert rep['selected_weight_mean'] > 0.66
+    assert check_connected(dates, sel)
+    assert rep['min_degree_actual'] >= 2
 
 
 def test_min_degree_enforced():
