@@ -58,13 +58,17 @@ def get_executor(cfg: dict) -> Slc2ifgExecutor:
     if engine_cfg == 'none':
         return BasicExecutor()
 
-    # auto | insarflow -> use the engine (lives inside mintpy since the
-    # insarflow package was merged; the heavy deps dask/cupy are only pulled
-    # by EngineExecutor.run(), so MintPy core stays free of them)
     if engine_cfg == 'insarflow':
         return EngineExecutor()
-    # auto: engine by default (it is part of mintpy); users can force the
-    # basic executor with engine = none
+    # auto: engine by default when dask is installed, otherwise fall back to
+    # the basic executor (documented contract: MintPy can always complete the
+    # slc2ifg workflow).
+    import importlib.util
+    if importlib.util.find_spec('dask') is None:
+        logger.warning(
+            "dask not found — falling back to the basic executor "
+            "(set mintpy.slc2ifg.engine = none to silence this warning)")
+        return BasicExecutor()
     logger.info("using the engine executor (set mintpy.slc2ifg.engine = none "
                 "for the basic executor)")
     return EngineExecutor()
@@ -160,18 +164,37 @@ class BasicExecutor(Slc2ifgExecutor):
     def _opt_float(self, key, fallback=None):
         return _cfg_get_float(self.cfg, key, fallback)
 
+    def _ps_nlks(self, fallback=1.0) -> float:
+        """Effective number of looks for phase-sigma / SNAPHU weighting.
+
+        Mirrors the engine's ``_ps_nlks``: explicit
+        ``slc2ifg.generate_coh.ps_nlks`` wins; otherwise the multilook
+        product's ``lks_y * lks_x`` when multilook runs; else 1.0.
+        """
+        default = fallback
+        if 'multilook' in self._tools_enabled():
+            lks_y = self._opt_int('slc2ifg.multilook.lks_y', 1) or 1
+            lks_x = self._opt_int('slc2ifg.multilook.lks_x', 1) or 1
+            default = float(lks_y * lks_x)
+        explicit = self._opt_float('slc2ifg.generate_coh.ps_nlks')
+        return explicit if explicit else default
+
     def _parallel_ctx(self, n_items: int, max_parallel_num: int = 8):
         """Return (num_cores, parallel, Parallel, delayed) via MintPy helper."""
         return ut.check_parallel(n_items, print_msg=False,
                                  maxParallelNum=max_parallel_num)
 
     def _tools_enabled(self) -> List[str]:
-        """Effective tool list: explicit engine.tools whitelist or default."""
+        """Effective tool list: ``engine.stages`` (authoritative chain spec)
+        or the deprecated ``engine.tools`` alias, else the default chain."""
+        stages_cfg = self._opt('engine.stages', 'auto')
+        if stages_cfg not in (None, 'auto'):
+            return [t.strip() for t in str(stages_cfg).split(',') if t.strip()]
         tools_cfg = self._opt('engine.tools', 'auto')
-        if tools_cfg in (None, 'auto'):
-            return ['ifgram_list', 'generate_ifgram', 'stitch',
-                    'multilook', 'filter', 'unwrap']
-        return [t.strip() for t in str(tools_cfg).split(',') if t.strip()]
+        if tools_cfg not in (None, 'auto'):
+            return [t.strip() for t in str(tools_cfg).split(',') if t.strip()]
+        return ['ifgram_list', 'generate_ifgram', 'stitch',
+                'multilook', 'filter', 'unwrap']
 
     def _run_ifgram_list(self, slc_dir: Path, out_dir: Path) -> Path:
         """Eagerly generate the pair list (chain topology depends on it)."""
@@ -186,25 +209,43 @@ class BasicExecutor(Slc2ifgExecutor):
         mode = self._opt('slc2ifg.ifgram_list.mode', 'sequential')
         start_date = self._opt('slc2ifg.ifgram_list.start_date')
         end_date = self._opt('slc2ifg.ifgram_list.end_date')
-        nconn = self._opt_int('slc2ifg.ifgram_list.num_connections', 5)
+        exclude_date = self._opt('slc2ifg.ifgram_list.exclude_date')
+        nconn = self._opt_int('slc2ifg.ifgram_list.num_connections')
         oneyear = self._opt_int('slc2ifg.ifgram_list.oneyear_interferograms')
 
         dates = get_date_list(str(slc_dir))
-        dates = filter_date_list(dates, start_date=start_date, end_date=end_date)
+        dates = filter_date_list(dates, start_date=start_date, end_date=end_date,
+                                 exclude_date=exclude_date)
         pair_file = out_dir / 'ifgram_list.txt'
 
         if mode == 'select':
-            params = {'num_connections': nconn if nconn else 3,
+            params = {'num_connections': nconn if nconn is not None else 3,
                       'slc_dir': str(slc_dir),
                       'processor': self._opt('slc2ifg.processor', 'isce3')}
             for k in ('annual_windows', 'temp_baseline_max', 'perp_baseline_max',
-                      'perp_baseline_file', 'weight_source', 'slc_pattern', 'coh_dir',
-                      'coh_kind', 'coh_variant', 'coh_stat',
-                      'quick_window', 'min_degree',
-                      'max_pairs', 'quality_threshold', 'robust', 'verify'):
+                      'perp_baseline_file', 'weight_source', 'slc_pattern',
+                      'model_tau_days', 'model_gamma0',
+                      'coh_dir', 'coh_kind', 'coh_variant', 'coh_stat',
+                      'coh_usable_threshold',
+                      'quick_window', 'quick_grid', 'quick_block',
+                      'quick_max_workers', 'quick_debias',
+                      'quick_stat', 'quick_usable_threshold',
+                      'min_degree', 'max_pairs', 'quality_threshold',
+                      'robust', 'verify'):
                 cfgk = f'slc2ifg.ifgram_list.select.{k}'
                 if self._opt(cfgk) is not None:
                     params[k] = self._opt(cfgk)
+            # report / dot: resolve relative paths against the work dir
+            # (mirrors the engine's _select_params)
+            for out_key, cfgk in (
+                    ('report_file', 'slc2ifg.ifgram_list.select.report'),
+                    ('dot_file', 'slc2ifg.ifgram_list.select.dot')):
+                rp = self._opt(cfgk)
+                if rp:
+                    p = Path(rp)
+                    if not p.is_absolute() and getattr(self, 'work_dir', None):
+                        p = (self.work_dir / p).resolve()
+                    params[out_key] = str(p)
             if oneyear is not None:
                 logger.warning(
                     "slc2ifg.ifgram_list.oneyear_interferograms is deprecated; "
@@ -215,7 +256,12 @@ class BasicExecutor(Slc2ifgExecutor):
                                             else f"{aw},365:{int(oneyear)}")
             pairs, _ = select_pairs(dates, params=params)
         else:
-            pairs = generate_pairs(dates, mode, nconn, oneyear)
+            nconn = nconn if nconn is not None else 5
+            # annual_windows applies to ALL modes (canonical knob)
+            aw = self._opt('slc2ifg.ifgram_list.select.annual_windows')
+            pairs = generate_pairs(
+                dates, mode, nconn, oneyear,
+                select_params={'annual_windows': aw} if aw is not None else None)
 
         write_pair_list(pairs, pair_file)
         logger.info("ifgram_list (%s): %d date(s) -> %d pair(s)",
@@ -234,6 +280,7 @@ class BasicExecutor(Slc2ifgExecutor):
         if not work_dir.is_absolute():
             work_dir = (Path.cwd() / work_dir).resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
+        self.work_dir = work_dir
 
         slc_input = self._opt('slc2ifg.slc_input')
         if not slc_input:
@@ -486,7 +533,7 @@ class BasicExecutor(Slc2ifgExecutor):
                 ps_win=self._opt_int('slc2ifg.generate_coh.ps_window_size', 5),
                 grad_win=self._opt_int(
                     'slc2ifg.generate_coh.ps_gradient_window', 5),
-                nlks=self._opt_float('slc2ifg.generate_coh.ps_nlks', 1.0),
+                nlks=self._ps_nlks(),
             )
             _write_band(str(out_path), coh, meta, processor,
                         'phase-sigma correlation')
@@ -511,7 +558,9 @@ class BasicExecutor(Slc2ifgExecutor):
             _unwrap_single(
                 ifg_path=Path(in_path),
                 cor_path=Path(cor) if cor else None,
-                nlooks=self._opt_float('slc2ifg.unwrap.snaphu.nlooks', 1.0),
+                nlooks=(self._opt_float('slc2ifg.unwrap.snaphu.nlooks')
+                        or self._opt_float('slc2ifg.unwrap.nlooks')
+                        or self._ps_nlks()),
                 output_dir=unw_root,
                 processor=processor,
                 snaphu_bin=self._opt('slc2ifg.unwrap.snaphu.binary'),
@@ -537,10 +586,15 @@ class BasicExecutor(Slc2ifgExecutor):
         val = self._opt(key)
         if val is None:
             return fallback
-        parts = [x.strip() for x in str(val).split(',')]
+        import re as _re
+        parts = [x.strip() for x in _re.split(r'[\s,]+', str(val)) if x.strip()]
         try:
+            if len(parts) != 4:
+                raise ValueError(f"expected 4 numbers, got {len(parts)}")
             return tuple(float(x) for x in parts)
         except ValueError:
+            logger.warning("Invalid %s value %r (expected 4 numbers, "
+                           "space/comma separated) — ignoring", key, val)
             return fallback
 
     def _discover_bursts(self, slc_dir: Path) -> List[Optional[str]]:
@@ -556,21 +610,82 @@ class BasicExecutor(Slc2ifgExecutor):
         return [None]
 
     def _run_crop(self, slc_dir: Path, work_dir: Path) -> Path:
-        """Crop SLCs to bbox (isce3 geocoded / isce2 radar)."""
+        """Crop SLCs to bbox, mirroring the engine CropSlcTool: dispatch on
+        processor (isce2 -> radar / isce3 -> geo), honour the crop pattern
+        and the ifgram_list date filter (start/end/exclude), and abort on a
+        non-zero exit code."""
+        import re as _re
+        from mintpy.stdproc.slc2ifg.utils import naming
+
+        processor = self._opt('slc2ifg.processor', 'isce3')
         wsen = self._opt('slc2ifg.crop_slc.wsen')
         if not wsen:
             raise ValueError("crop_slc requires slc2ifg.crop_slc.wsen")
-        from mintpy.stdproc.slc2ifg.crop_slc_geo import main as geo_main
-        from mintpy.stdproc.slc2ifg.crop_slc_geo import parse_arguments as geo_parse
         out_dir = work_dir / 'cropped_slc'
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # date filter (start/end/exclude) -> --file-list, mirroring the
+        # engine's _add_crop_node (non-date files are always kept)
+        from mintpy.stdproc.slc2ifg.ifgram_list import parse_exclude_dates
+        start_date = self._opt('slc2ifg.ifgram_list.start_date')
+        end_date = self._opt('slc2ifg.ifgram_list.end_date')
+        ex_dates = parse_exclude_dates(
+            self._opt('slc2ifg.ifgram_list.exclude_date'))
+        pattern = self._opt('slc2ifg.crop_slc.pattern',
+                            naming.slc_pattern(processor))
+        candidates = sorted(Path(slc_dir).glob(f"**/{pattern}"))
+        keep = []
+        for p in candidates:
+            m = _re.search(r'(20\d{6})', p.name)
+            if not m:
+                keep.append(str(p))      # non-date assets always kept
+                continue
+            d = m.group(1)
+            if start_date and d < str(start_date):
+                continue
+            if end_date and d > str(end_date):
+                continue
+            if d in ex_dates:
+                continue
+            keep.append(str(p))
+        if not keep:
+            raise ValueError(
+                f"No SLC files match the crop date range "
+                f"[{start_date or '-inf'}, {end_date or '+inf'}] "
+                f"excl {ex_dates} under {slc_dir}")
+
+        list_file = work_dir / 'crop_file_list.txt'
+        list_file.write_text('\n'.join(keep) + '\n')
+
+        wsen_tokens = [x for x in _re.split(r'[\s,]+', str(wsen)) if x.strip()]
+        if len(wsen_tokens) != 4:
+            raise ValueError(
+                f"slc2ifg.crop_slc.wsen must be 4 numbers, got {wsen!r}")
         args_list = [
             '--input-dir', str(slc_dir),
+            '--file-list', str(list_file),
             '--output-dir', str(out_dir),
-            '--wsen'] + [str(x) for x in str(wsen).split()] + [
+            '--wsen'] + wsen_tokens + [
             '--buffer', str(self._opt_float('slc2ifg.crop_slc.buffer', 0.0)),
             '--prefix', str(self._opt('slc2ifg.crop_slc.prefix', '')),
+            '--max-workers', str(self._opt_int('engine.max_workers', 1) or 1),
         ]
-        geo_main(geo_parse(args_list))
+        if self._opt('slc2ifg.crop_slc.geom_dir'):
+            args_list += ['--geom-dir', str(self._opt('slc2ifg.crop_slc.geom_dir'))]
+        if self._opt('slc2ifg.crop_slc.by_burst', 'false').lower() in ('true', 'yes', '1'):
+            args_list.append('--by-burst')
+        args_list.append('--no-burst-dirs')
+
+        if processor == 'isce2':
+            from mintpy.stdproc.slc2ifg.crop_slc_rdr import main as rdr_main
+            from mintpy.stdproc.slc2ifg.crop_slc_rdr import parse_arguments as rdr_parse
+            ret = rdr_main(rdr_parse(args_list))
+        else:
+            from mintpy.stdproc.slc2ifg.crop_slc_geo import main as geo_main
+            from mintpy.stdproc.slc2ifg.crop_slc_geo import parse_arguments as geo_parse
+            ret = geo_main(geo_parse(args_list))
+        if ret not in (0, None):
+            raise RuntimeError(f"crop_slc failed with exit code {ret}")
         return out_dir
 
 

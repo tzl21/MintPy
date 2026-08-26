@@ -299,7 +299,7 @@ def extract_date_from_filename(file_path: str) -> str:
 
     mtime = os.path.getmtime(file_path)
     import time
-    return time.strftime("%Y%m%d", time.gmtime(mtime))
+    return time.strftime("%Y%m%d", time.localtime(mtime))
 
 
 def extract_burst_id(file_path: str) -> Optional[str]:
@@ -475,17 +475,17 @@ def _get_geotiff_extent_4326(file_path: str) -> Optional[tuple]:
             dst_srs = osr.SpatialReference()
             dst_srs.ImportFromEPSG(4326)
             if not src_srs.IsSame(dst_srs):
+                # Force traditional GIS axis order (x=lon, y=lat) on both
+                # SRS objects so TransformPoint deterministically returns
+                # (lon, lat) — the previous hemisphere heuristic broke for
+                # |lon| < 90° scenes (Europe / eastern US / ...).
+                src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                dst_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
                 transform = osr.CoordinateTransformation(src_srs, dst_srs)
                 try:
                     ll = transform.TransformPoint(extent[0], extent[1])
                     ur = transform.TransformPoint(extent[2], extent[3])
-                    # PROJ axis order: TransformPoint may return (lat,lon) for 4326
-                    ll_lat, ll_lon = ll[0], ll[1]
-                    ur_lat, ur_lon = ur[0], ur[1]
-                    if abs(ll_lat) <= 90 and abs(ll_lon) > 90:
-                        extent = (ll_lon, ll_lat, ur_lon, ur_lat)
-                    else:
-                        extent = (ll[0], ll[1], ur[0], ur[1])
+                    extent = (ll[0], ll[1], ur[0], ur[1])
                 except Exception:
                     pass
         return extent
@@ -658,8 +658,8 @@ def _crop_hdf5_direct(hdf5_path, output_path, crop_bounds_4326, subdataset,
         # RasterBlockError otherwise).  A small crop subset can be < 256 px,
         # where min(256, n) would yield e.g. 220 -> invalid; round down to
         # the nearest multiple of 16 instead.
-        blockxsize=max(16, min(256, (data.shape[1] // 16) * 16)),
-        blockysize=max(16, min(256, (data.shape[0] // 16) * 16)),
+        blockxsize=min(data.shape[1], max(16, (data.shape[1] // 16) * 16)),
+        blockysize=min(data.shape[0], max(16, (data.shape[0] // 16) * 16)),
         nodata=np.nan,
     ) as dst:
         dst.write(data, 1)

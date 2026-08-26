@@ -219,7 +219,7 @@ def _resolve_annual_windows(
         v = value.strip().lower()
         if v in ('', 'none', 'off', '0'):
             return ()
-        if v == 'auto':
+        if v in ('auto', 'default'):
             return auto_annual_windows(dates)
     parsed = parse_annual_windows(value)
     return parsed if parsed is not None else auto_annual_windows(dates)
@@ -1072,6 +1072,34 @@ def verify_selection(
 # ------------------------------------------------------------------------
 # Orchestration
 # ------------------------------------------------------------------------
+def _as_bool(value, default=False):
+    """Coerce a bool or common string form into a bool.
+
+    Accepts real bools and the string forms used across config layers
+    ('true'/'false'/'yes'/'no'/'1'/'0'/'on'/'off'); 'auto'/'default'/''/None
+    fall back to ``default`` (mirrors ``get_bool_opt`` semantics so the
+    engine and the basic executor agree on string config values).
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    v = str(value).strip().lower()
+    if v in ('', 'auto', 'default'):
+        return default
+    return v in ('true', 'yes', '1', 'on')
+
+
+def _as_int(value, default):
+    """Coerce a value to int, tolerating 'auto'/''/invalid strings."""
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def select_pairs(
     dates: Sequence[str],
     slc_dir: Optional[str] = None,
@@ -1155,7 +1183,7 @@ def select_pairs(
                 max_pixels=int(p.get('quick_max_pixels') or 1_048_576),
                 grid=int(p.get('quick_grid') or 12),
                 block=int(p.get('quick_block') or 16),
-                debias=bool(p.get('quick_debias', True)),
+                debias=_as_bool(p.get('quick_debias', True), default=True),
                 stat=str(p.get('quick_stat') or 'mean'),
                 usable_threshold=float(p.get('quick_usable_threshold') or 0.3),
                 max_workers=int(p.get('quick_max_workers') or 1),
@@ -1184,7 +1212,8 @@ def select_pairs(
 
     # 3. selection
     md = p.get('min_degree')
-    min_degree = int(md) if md is not None else DEFAULT_PARAMS['min_degree']
+    min_degree = (_as_int(md, DEFAULT_PARAMS['min_degree'])
+                  if md is not None else DEFAULT_PARAMS['min_degree'])
     selected, report = select_ifgrams(
         dates,
         candidates,
@@ -1192,12 +1221,12 @@ def select_pairs(
         min_degree=min_degree,
         max_pairs=p.get('max_pairs'),
         quality_threshold=float(p.get('quality_threshold') or 0.0),
-        robust=bool(p.get('robust', False)),
+        robust=_as_bool(p.get('robust', False)),
     )
 
     # 4. verification
     ver = verify_selection(dates, selected, reference=p.get('reference'),
-                           check_rank=bool(p.get('verify', True)))
+                           check_rank=_as_bool(p.get('verify', True), default=True))
     report['weight_source'] = weight_source_used
     report['connected'] = ver['connected']
     report['rank'] = ver['rank']

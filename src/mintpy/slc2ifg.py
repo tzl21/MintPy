@@ -54,6 +54,10 @@ def run_slc2ifg(cfg_file=None, template=None):
     """
     from mintpy.stdproc.slc2ifg.executor import get_executor
 
+    if isinstance(template, str):
+        # --template as a raw config string: parse it into a dict
+        # (read_template accepts a raw string directly)
+        template = readfile.read_template(template)
     cfg = template if template else read_slc2ifg_template(cfg_file)
     if cfg_file:
         cfg['_cfg_file'] = os.path.abspath(cfg_file)

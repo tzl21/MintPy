@@ -166,6 +166,7 @@ def stitch_all(args: argparse.Namespace) -> int:
             burst_dirs = [root_dir]
 
         epsg_utm = 32605
+        detected = False
         for bd in burst_dirs:
             for ft in args.file_types:
                 candidates = list(bd.glob(f"**/*{ft}"))
@@ -173,7 +174,10 @@ def stitch_all(args: argparse.Namespace) -> int:
                     epsg = get_file_epsg(candidates[0])
                     if epsg:
                         epsg_utm = epsg
-                    break
+                        detected = True
+                        break
+            if detected:
+                break
 
         grouped = group_files_by_date_pair(burst_dirs, args.file_types)
         if not grouped:
@@ -185,8 +189,12 @@ def stitch_all(args: argparse.Namespace) -> int:
             for ftype, flist in type_files.items():
                 if not flist:
                     continue
-                # Preserve fixed structure: output_dir/{date_pair}/{name}
-                out_path = Path(args.output_dir) / date_pair / Path(flist[0]).name
+                # Preserve fixed structure:
+                # output_dir/{prefix}{date_pair}/{name} (prefix may be empty)
+                out_dir = Path(args.output_dir)
+                if args.output_prefix:
+                    out_dir = out_dir / args.output_prefix
+                out_path = out_dir / date_pair / Path(flist[0]).name
                 tasks.append({
                     'file_list': flist,
                     'output_path': out_path,

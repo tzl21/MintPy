@@ -21,6 +21,7 @@ Parallelism uses threads (``ThreadPoolExecutor``).
 import argparse
 import glob
 import logging
+import os
 import re
 import sys
 import time
@@ -36,6 +37,8 @@ from scipy.ndimage import correlate
 from .utils.naming import coh_path
 from .utils.slc2ifg_utils import create_xml_for_binary, open_gdal
 
+
+logger = logging.getLogger(__name__)
 gdal.UseExceptions()
 
 DEFAULT_PARAMS = {
@@ -201,6 +204,10 @@ def read_complex_image(filename: str, processor: str,
     if metadata['band_count'] == 1:
         data = ds.GetRasterBand(1).ReadAsArray()
         if data.dtype not in (np.complex64, np.complex128):
+            logger.warning(
+                "%s: band 1 is real-valued (dtype %s) — casting to complex "
+                "with zero imaginary part; verify the product is really "
+                "complex data", filename, data.dtype)
             data = data.astype(np.complex64)
     elif metadata['band_count'] == 2:
         real = ds.GetRasterBand(1).ReadAsArray()
@@ -227,21 +234,39 @@ def write_coherence_image(filename: str, coherence: np.ndarray,
         driver = 'GTiff'
         options = ['COMPRESS=LZW', 'TILED=YES']
 
-    driver_obj = gdal.GetDriverByName(driver)
-    out_ds = driver_obj.Create(filename, cols, rows, 1, gdal.GDT_Float32, options)
-    out_ds.SetGeoTransform(metadata['transform'])
-    out_ds.SetProjection(metadata['projection'])
+    # atomic write: create at '<filename>.tmp', rename only after a
+    # successful close (an interrupted run leaves no partial product)
+    tmp_file = f"{filename}.tmp"
+    try:
+        driver_obj = gdal.GetDriverByName(driver)
+        out_ds = driver_obj.Create(tmp_file, cols, rows, 1, gdal.GDT_Float32,
+                                   options)
+        out_ds.SetGeoTransform(metadata['transform'])
+        out_ds.SetProjection(metadata['projection'])
 
-    band = out_ds.GetRasterBand(1)
-    band.WriteArray(coherence)
-    band.SetDescription('coherence')
-    band.SetNoDataValue(0.0)
+        band = out_ds.GetRasterBand(1)
+        band.WriteArray(coherence)
+        band.SetDescription('coherence')
+        band.SetNoDataValue(0.0)
 
-    if driver == 'GTiff':
-        band.SetColorInterpretation(gdal.GCI_GrayIndex)
+        if driver == 'GTiff':
+            band.SetColorInterpretation(gdal.GCI_GrayIndex)
 
-    out_ds.FlushCache()
-    out_ds = None
+        out_ds.FlushCache()
+        out_ds = None
+        os.replace(tmp_file, filename)
+        # ENVI companion .hdr
+        tmp_hdr = f"{tmp_file}.hdr"
+        if os.path.exists(tmp_hdr):
+            os.replace(tmp_hdr, f"{filename}.hdr")
+    except BaseException:
+        for stray in (tmp_file, f"{tmp_file}.hdr"):
+            try:
+                if os.path.exists(stray):
+                    os.unlink(stray)
+            except OSError:
+                pass
+        raise
 
 
 def extract_date_from_slc(filename: str) -> str:
@@ -256,10 +281,17 @@ def extract_date_from_slc(filename: str) -> str:
         name = name[:-4]   # remove '.slc'
     elif name.endswith('.tif') or name.endswith('.tiff'):
         name = Path(filename).stem
-    # Try to find an 8-digit date pattern
+    # Try to find an 8-digit date pattern and validate it is a real date
     match = re.search(r'(\d{8})', name)
     if match:
-        return match.group(1)
+        candidate = match.group(1)
+        try:
+            from datetime import datetime as _dt
+            _dt.strptime(candidate, '%Y%m%d')
+            return candidate
+        except ValueError:
+            logger.warning("8-digit sequence %r in %s is not a valid date",
+                           candidate, Path(filename).name)
     # Fallback to the cleaned name
     return name
 
@@ -477,7 +509,7 @@ def main(args=None):
     slc_directories = expand_directories(args.slc_dir)
     if not slc_directories:
         logger.error("No SLC directories found.")
-        sys.exit(1)
+        return 1
 
     logger.info(f"Found {len(slc_directories)} SLC directories:")
     for d in slc_directories:
@@ -489,7 +521,7 @@ def main(args=None):
         logger.info(f"Found {len(pairs_df)} pairs in {args.pairs_file}")
     except Exception as e:
         logger.error(f"Error reading pairs file {args.pairs_file}: {e}")
-        sys.exit(1)
+        return 1
 
     # Detect burst subdirectories for per-burst processing
     burst_map = _detect_burst_dirs(slc_directories)
@@ -514,7 +546,7 @@ def main(args=None):
 
     if not slc_pairs:
         logger.error("No valid SLC pairs found. Exiting.")
-        sys.exit(1)
+        return 1
 
     logger.info(f"Found {len(slc_pairs)} SLC pair(s) to process")
 

@@ -214,7 +214,12 @@ class PhsigCohTool(Tool):
         processor = ctx.param('processor')
         ps_half = ps_win // 2
         grad_half = grad_win // 2
-        overlap = grad_half + ps_half + 1
+        # The block kernel zeroes the outer ``grad_half+1`` slope band at
+        # block borders; slopes within ``[grad_half+1, 2*grad_half]`` have
+        # gaussian windows reaching into that band and contaminate the ps
+        # windows of the first ``grad_half`` output rows/cols of every tile.
+        # ``+1`` only excludes the band itself, not its contamination reach.
+        overlap = 2 * grad_half + ps_half + 1
 
         def compute_block(block):
             return estimate_phsig_block(block, ps_win, grad_win, nlks,

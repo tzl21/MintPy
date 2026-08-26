@@ -394,6 +394,43 @@ def test_cleanup_keep_policy_stage_names():
         assert unw not in to_delete2
 
 
+def test_cleanup_keeps_pair_dir_containing_final_products():
+    """A recorded DIRECTORY (e.g. the generate_ifgram pair_dir) that
+    physically contains a kept final product (unw/conncomp/phsig) must not be
+    rmtree'd by the default cleanup — otherwise the final products are
+    destroyed along with the intermediates (regression)."""
+    import tempfile
+
+    from mintpy.stdproc.slc2ifg.engine.manifest import (
+        Manifest,
+        execute_cleanup,
+        plan_cleanup,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        m = Manifest(tmp / 'm.json')
+        pair_dir = tmp / '20220105_20220117'
+        pair_dir.mkdir()
+        ifg = pair_dir / 'fullres.int.tif'
+        ifg.write_text('x')
+        unw = pair_dir / 'fullres.unw.tif'
+        unw.write_text('x')
+        # record the pair DIRECTORY (as GenerateIfgramTool returns pair_dir)
+        m.record('generate_ifgram#single#20220105_20220117', [ifg, pair_dir])
+        m.record('unwrap#20220105_20220117', [unw])
+
+        to_delete = plan_cleanup(m, keep_policy='none')
+        assert unw not in to_delete          # final product always kept
+        assert ifg in to_delete              # intermediate file deleted
+        assert pair_dir not in to_delete, \
+            'pair dir containing the kept unw must survive cleanup'
+        # executing the plan must not delete the final product
+        execute_cleanup(to_delete)
+        assert unw.exists()
+        assert not ifg.exists()
+
+
 def test_execute_cleanup_deletes_directories():
     """Cleanup must remove directory products (e.g. crop_slc output dir)
     recursively — unlink alone fails with 'Is a directory'."""

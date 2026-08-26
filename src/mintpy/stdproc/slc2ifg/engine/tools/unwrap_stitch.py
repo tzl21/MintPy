@@ -101,7 +101,15 @@ class UnwrapTool(Tool):
         ctx.logger.info("unwrap (%s, coh_type=%s): %s/%s %s", algorithm,
                         ctx.param('coh_type', 'auto'),
                         unw.parent.name, unw.name, ctx.elapsed_str())
-        return {'unw': unw, 'conncomp': cc}
+        if cc.exists():
+            return {'unw': unw, 'conncomp': cc}
+        # SNAPHU produced no connected-component output (e.g. failure path):
+        # only advertise the unw product, so downstream consumers never get a
+        # path that does not exist.
+        ctx.logger.warning(
+            "unwrap %s: no conncomp output produced (%s missing)",
+            unw.name, cc.name)
+        return {'unw': unw}
 
 
 @register
@@ -137,6 +145,11 @@ class StitchTool(Tool):
             if epsg:
                 epsg_utm = epsg
                 break
+        else:
+            ctx.logger.warning(
+                "stitch %s: no input yielded a readable EPSG — defaulting to "
+                "UTM zone 5N (verify the product CRS for data outside "
+                "zone 5N)", ctx.tool_name)
 
         out_bounds = self._parse_bounds(ctx.param('out_bounds'))
         ok = stitch_date_pair(file_list, out, out_bounds, overwrite, epsg_utm)
@@ -148,7 +161,10 @@ class StitchTool(Tool):
     def _parse_bounds(raw: Optional[str]) -> Optional[Tuple[float, float, float, float]]:
         if not raw:
             return None
-        parts = [float(x) for x in str(raw).split()]
+        if str(raw).strip().lower() in ('auto', 'none', ''):
+            return None
+        import re
+        parts = [float(x) for x in re.split(r'[\s,]+', str(raw)) if x.strip()]
         if len(parts) != 4:
             raise ValueError(f"Invalid out_bounds '{raw}', expected 'W S E N'")
         return tuple(parts)  # type: ignore[return-value]

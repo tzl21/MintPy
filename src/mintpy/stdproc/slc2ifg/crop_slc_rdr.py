@@ -330,13 +330,15 @@ def _write_envi_hdr(hdr_path, width, height, bands, dtype):
     for b in range(1, bands + 1):
         lines.append('Band {},'.format(b))
     lines.append('}')
-    lines.append('data ignore value = 0')
+    # NB: no 'data ignore value' line — for geometry products (lat/lon/
+    # height/los) 0 is a valid value and must not be treated as nodata.
     with open(hdr_path, 'w') as f:
         f.write('\n'.join(lines) + '\n')
     logger = logging.getLogger(__name__)
     logger.info(f'  Created ENVI .hdr: {os.path.basename(hdr_path)}')
 
-def crop_coordinate_files(geom_dir, crop_window, output_geom_dir, verbose=False):
+def crop_coordinate_files(geom_dir, crop_window, output_geom_dir,
+                          verbose=False, no_skip_existing=False):
     """
     Safely crop all .full coordinate files, band by band.
     This ensures complete correctness for multi-band files.
@@ -366,8 +368,8 @@ def crop_coordinate_files(geom_dir, crop_window, output_geom_dir, verbose=False)
             output_name = base_name
             output_path = os.path.join(output_geom_dir, output_name)
 
-            # Skip if output already exists
-            if os.path.exists(output_path):
+            # Skip if output already exists (unless forced to recrop)
+            if os.path.exists(output_path) and not no_skip_existing:
                 logger.info(f"Skipping existing geometry file: {output_name}")
                 results.append((full_file, output_path, True, "Skipped (exists)"))
                 continue
@@ -677,7 +679,9 @@ def main(args=None):
 
     # Crop geometry files (always process, independent of SLC skip status)
     logger.info(f"\nCropping coordinate files to: {output_geom_dir}")
-    coord_results = crop_coordinate_files(args.geom_dir, crop_window, output_geom_dir, args.verbose)
+    coord_results = crop_coordinate_files(
+        args.geom_dir, crop_window, output_geom_dir, args.verbose,
+        no_skip_existing=args.no_skip_existing)
     print_processing_summary(coord_results, "Coordinate files")
 
     # Process SLC files in parallel

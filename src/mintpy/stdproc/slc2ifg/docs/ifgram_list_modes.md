@@ -59,8 +59,9 @@ The network is the **k-th power of the temporal path graph**.
 | key | default | effect |
 |---|---|---|
 | `num_connections` | `5` | `k`. `k ≥ N−1` degenerates to the complete graph. |
-| `annual_windows` | `auto` | additionally emit every pair whose baseline is within any `center:tol` window (e.g. one-year = `365:<range>`). Canonical knob for annual/one-year pairs in every mode (the legacy `oneyear_interferograms` is a deprecated alias). |
+| `annual_windows` | `auto` | additionally emit every pair whose baseline is within any `center:tol` window (e.g. one-year = `365:<range>`). Canonical knob for annual/one-year pairs in **every** mode (the legacy `oneyear_interferograms` is a deprecated alias). |
 | `start_date` / `end_date` | — | dates outside `[start, end]` are dropped *before* pairing (also filters the crop file list). |
+| `exclude_date` | — | comma/space-separated `YYYYMMDD` list (or repeated CLI `--exclude-date`): those dates are dropped *before* pairing — a bad SLC acquisition never appears in any interferogram (also filters the crop file list). e.g. `20200101,20200615`. |
 
 ### 1.5 When to use
 
@@ -98,7 +99,7 @@ other date:
 
 ### 2.4 Parameters
 
-Same `start_date` / `end_date` / `annual_windows` as
+Same `start_date` / `end_date` / `exclude_date` / `annual_windows` as
 `sequential` (`num_connections` is ignored).
 
 ### 2.5 When to use
@@ -301,7 +302,7 @@ fully-connected-on-downsampled-SLCs idea):
 ```ini
 slc2ifg.ifgram_list.mode = select
 slc2ifg.ifgram_list.select.weight_source = coherence
-slc2ifg.ifgram_list.select.num_connections = 0        # no k-NN skeleton
+slc2ifg.ifgram_list.num_connections = 0               # no k-NN skeleton
 slc2ifg.ifgram_list.select.annual_windows = none      # no window pairs
 slc2ifg.ifgram_list.select.temp_baseline_max = 48     # all pairs <= 48 days
 slc2ifg.ifgram_list.select.min_degree = 2
@@ -316,6 +317,7 @@ window-pair rule.)
 
 | key | default | effect |
 |---|---|---|
+| `exclude_date` | — | mode-independent: drop the listed `YYYYMMDD` date(s) *before* selection — a bad SLC never enters the candidate/weighting steps (also filters the crop file list). |
 | `num_connections` | `3` | k-NN skeleton size (0 = off). |
 | `annual_windows` | `auto` | `auto` derives half-year / one-year windows from the repeat cycle; explicit `center:tol` day-pair list (comma-separated) overrides; `none`/`off`/`0`/empty disables the rule. |
 | `temp_baseline_max` | — | include all pairs with `Δt ≤` this many days. |

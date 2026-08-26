@@ -116,6 +116,27 @@ def multilook_data(data, lks_y=1, lks_x=1, method='mean'):
     return out_data
 
 
+
+def _output_matches_looks(input_tif, output_tif, lks_y, lks_x):
+    """True when the existing output's size equals the expected multilooked
+    size for the given look factors (cheap metadata-only check)."""
+    try:
+        from osgeo import gdal
+        ds = gdal.Open(input_tif, gdal.GA_ReadOnly)
+        if ds is None:
+            return False
+        in_rows, in_cols = ds.RasterYSize, ds.RasterXSize
+        ds = None
+        ods = gdal.Open(output_tif, gdal.GA_ReadOnly)
+        if ods is None:
+            return False
+        out_rows, out_cols = ods.RasterYSize, ods.RasterXSize
+        ods = None
+    except Exception:
+        return False
+    return (out_rows == in_rows // int(lks_y)
+            and out_cols == in_cols // int(lks_x))
+
 def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
                   processor='isce3', box=None):
     """Apply multilooking (spatial averaging/resampling) to a GDAL-readable file.
@@ -174,8 +195,14 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
                  input_tif, output_tif, method, processor)
 
     if os.path.exists(output_tif):
-        logger.info(f"Skipping existing output: {output_tif}")
-        return output_tif
+        # A re-run with different look factors must not silently keep a
+        # stale product of the old size: validate before skipping.
+        if _output_matches_looks(input_tif, output_tif, lks_y, lks_x):
+            logger.info(f"Skipping existing output: {output_tif}")
+            return output_tif
+        logger.warning(
+            "Existing output %s does not match the requested multilook "
+            "%dx%d — regenerating", output_tif, lks_y, lks_x)
 
     # Warn if file extension does not match processor expectations
     input_ext = Path(input_tif).suffix.lower()

@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
+import re
+
 import numpy as np
 
 
@@ -86,11 +88,12 @@ def goldstein(
     norm = np.zeros((p_rows, p_cols), dtype=np.float32)
 
     if gpu:
-        # Optional engine accelerator (lazy import): when the insarflow
-        # engine is installed it provides GPU kernels; otherwise fall back
-        # to the CPU path below.
+        # Optional engine accelerator (lazy import): the merged mintpy GPU
+        # kernel when importable, otherwise fall back to the CPU path below.
+        # (The legacy ``insarflow`` package no longer exists — a stale import
+        # used to silently disable GPU here.)
         try:
-            from insarflow.engine.gpu_kernels import goldstein_block
+            from mintpy.stdproc.slc2ifg.engine.gpu_kernels import goldstein_block
         except ImportError:
             gpu = False
         else:
@@ -279,7 +282,18 @@ def filter_rasters(
             if out_variant == variant:
                 return output_dir / date_pair / unw_path.name
             return output_dir / date_pair / f"{out_variant}.int.tif"
+        if is_date_pair_dir(date_pair):
+            # include the date pair: the flat fallback name would otherwise
+            # collide across pairs (e.g. every pair's fullres.unw.tif)
+            return output_dir / f"filtered_{date_pair}_{unw_path.stem}{unw_path.suffix}"
         return output_dir / f"filtered_{unw_path.stem}{unw_path.suffix}"
+
+    # match coherence/conncomp by date-pair key rather than positional order
+    def _dp_key(path: Path) -> str:
+        m = re.search(r'(\d{8})_(\d{8})', str(path))
+        return m.group(0) if m else path.name
+    cor_by_key = {_dp_key(Path(c)): Path(c) for c in (cor_filenames or [])}
+    cc_by_key = {_dp_key(Path(c)): Path(c) for c in (conncomp_filenames or [])}
 
     def process_one(idx: int) -> Path:
         unw_path = Path(unw_filenames[idx])
@@ -294,16 +308,14 @@ def filter_rasters(
         unw_data = load_gdal(str(unw_path))
 
         this_mask = bad_pixel_mask.copy()
-        if cor_filenames is not None and idx < len(cor_filenames):
-            cor_path = cor_filenames[idx]
-            if cor_path is not None and cor_path.exists():
-                cor_data = load_gdal(str(cor_path))
-                this_mask = this_mask | (cor_data < correlation_cutoff)
-        if conncomp_filenames is not None and idx < len(conncomp_filenames):
-            cc_path = conncomp_filenames[idx]
-            if cc_path is not None and cc_path.exists():
-                cc_data = load_gdal(str(cc_path))
-                this_mask = this_mask | (cc_data == 0)
+        cor_path = cor_by_key.get(_dp_key(unw_path))
+        if cor_path is not None and cor_path.exists():
+            cor_data = load_gdal(str(cor_path))
+            this_mask = this_mask | (cor_data < correlation_cutoff)
+        cc_path = cc_by_key.get(_dp_key(unw_path))
+        if cc_path is not None and cc_path.exists():
+            cc_data = load_gdal(str(cc_path))
+            this_mask = this_mask | (cc_data == 0)
 
         from osgeo import gdal
         ds = gdal.Open(str(unw_path))

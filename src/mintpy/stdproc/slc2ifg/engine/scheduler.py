@@ -279,6 +279,10 @@ def execute_graph(
 
     if scheduler in (None, '', 'auto'):
         scheduler = 'threaded'
+    if scheduler not in ('threaded', 'distributed'):
+        raise ValueError(
+            f"Invalid engine.scheduler value {scheduler!r} — must be "
+            "'threaded' or 'distributed'")
 
     if plan is None:
         from mintpy.stdproc.slc2ifg.engine.resources import build_resource_plan
@@ -371,6 +375,15 @@ def _execute_distributed(graph: TaskGraph, order: List[str],
         client = Client(**kwargs)
     try:
         tasks: Dict[str, object] = {}
+        gpu_nodes = [k for k in order
+                     if graph.nodes[k].tool.resource.device == 'gpu']
+        if gpu_nodes:
+            logger.warning(
+                "scheduler=distributed with %d GPU task(s): the workers must "
+                "declare a 'GPU' resource (e.g. LocalCluster(resources={{'GPU': 1}}), "
+                "one slot per device), otherwise GPU tasks queue forever "
+                "— and device selection is left to the worker, not the "
+                "client-side GpuPool", len(gpu_nodes))
         for key in order:
             node = graph.nodes[key]
             deps = [tasks[d] for d in node.deps]

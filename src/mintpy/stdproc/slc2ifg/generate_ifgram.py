@@ -78,8 +78,15 @@ def find_slc_file_by_date(slc_dirs, target_date, slc_pattern, processor):
     expected_exts = ['.slc', '.rdr', '.full'] if processor == 'isce2' else ['.tif', '.tiff', '.h5', '.hdf5']
     for slc_dir in slc_dirs:
         pattern = f"*{target_date}{slc_pattern}"
-        matching_files = list(slc_dir.glob(pattern)) + list(slc_dir.glob(f"*/{pattern}"))
+        matching_files = sorted(
+            list(slc_dir.glob(pattern)) + list(slc_dir.glob(f"*/{pattern}")))
         if matching_files:
+            if len(matching_files) > 1:
+                logger.warning(
+                    "Multiple SLC candidates for date %s: %s — using %s",
+                    target_date,
+                    [f.name for f in matching_files],
+                    matching_files[0].name)
             found = matching_files[0]
             ext = found.suffix.lower()
             if ext not in expected_exts:
@@ -92,14 +99,15 @@ def find_slc_file_by_date(slc_dirs, target_date, slc_pattern, processor):
 
 
 def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: str) -> bool:
-    """
-    Materialise a VRT interferogram into a raster file.
+    """Materialise the VRT to a CFloat32 raster, atomically.
 
-    Output format: GeoTIFF for isce3, ENVI for isce2.
-    Reads/writes in row blocks to bound peak memory on large scenes.
+    The product is written to ``<output>.tmp`` and renamed into place only
+    after a successful close, so an interrupted run never leaves a partial
+    file at the final path (the ENVI ``.hdr`` sidecar is renamed along).
     """
+    tmp_path = Path(str(output_path) + '.tmp')
     try:
-        ref_ds = gdal.Open(str(vrt_path))
+        ref_ds = gdal.Open(str(vrt_path), gdal.GA_ReadOnly)
         if ref_ds is None:
             logger.error("Cannot open VRT: %s", vrt_path)
             return False
@@ -114,10 +122,11 @@ def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: 
             logger.error("GDAL driver %s not available.", driver_name)
             return False
 
-        options = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER'] if processor == 'isce3' else []
+        options = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER'] \
+            if processor == 'isce3' else []
 
         out_ds = driver.Create(
-            str(output_path), cols, rows, 1, gdal.GDT_CFloat32, options=options
+            str(tmp_path), cols, rows, 1, gdal.GDT_CFloat32, options=options
         )
         if out_ds is None:
             logger.error("Cannot create output: %s", output_path)
@@ -127,17 +136,22 @@ def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: 
         out_band = out_ds.GetRasterBand(1)
 
         # Block-wise copy: read a chunk of the VRT and write it out
-        try:
-            for r0 in range(0, rows, _MATERIALISE_BLOCK_ROWS):
-                r1 = min(r0 + _MATERIALISE_BLOCK_ROWS, rows)
-                block = ref_band.ReadAsArray(0, r0, cols, r1 - r0)
-                if block is None:
-                    raise RuntimeError("VRT block read failed")
-                out_band.WriteArray(block, 0, r0)
-        finally:
-            out_band = None
-            out_ds = None
-            ref_ds = None
+        for r0 in range(0, rows, _MATERIALISE_BLOCK_ROWS):
+            r1 = min(r0 + _MATERIALISE_BLOCK_ROWS, rows)
+            block = ref_band.ReadAsArray(0, r0, cols, r1 - r0)
+            if block is None:
+                raise RuntimeError("VRT block read failed")
+            out_band.WriteArray(block, 0, r0)
+        out_band = None
+        out_ds = None
+        ref_band = None
+        ref_ds = None
+
+        # atomic rename: data file + ENVI .hdr sidecar
+        tmp_path.replace(output_path)
+        hdr_tmp = Path(str(tmp_path) + '.hdr')
+        if hdr_tmp.exists():
+            hdr_tmp.replace(Path(str(output_path) + '.hdr'))
 
         if processor == 'isce2':
             create_xml_for_binary(output_path, family='intimage',
@@ -146,12 +160,27 @@ def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: 
 
     except Exception as e:
         logger.error("Error materialising VRT %s: %s", vrt_path.name, e)
+        for stray in (tmp_path, Path(str(tmp_path) + '.hdr')):
+            try:
+                if stray.exists():
+                    stray.unlink()
+            except OSError:
+                pass
         return False
 
 
-# ------------------------------------------------------------------------
-# Combined processing of one pair (VRT + optional materialisation)
-# ------------------------------------------------------------------------
+def _vrt_is_valid(vrt_path: Path) -> bool:
+    """Cheap well-formedness check for an existing VRT (XML)."""
+    if not vrt_path.exists() or vrt_path.stat().st_size == 0:
+        return False
+    try:
+        import xml.etree.ElementTree as ET
+        ET.parse(vrt_path)
+        return True
+    except Exception:
+        return False
+
+
 def process_single_pair(pair_info):
     """
     Worker function that creates a VRT (if needed) and, if not only_vrt,
@@ -171,9 +200,16 @@ def process_single_pair(pair_info):
         return (date12, False, "Second SLC file not found")
 
     # --- 2. VRT creation ---
-    if vrt_path.exists():
+    if vrt_path.exists() and _vrt_is_valid(vrt_path):
         logger.debug("VRT already exists: %s", vrt_path.name)
     else:
+        if vrt_path.exists():
+            logger.warning("Existing VRT appears corrupt, rebuilding: %s",
+                           vrt_path.name)
+            try:
+                vrt_path.unlink()
+            except OSError:
+                pass
         try:
             vrt_args = {
                 "ref_slc": str(slc1_path),
@@ -193,9 +229,16 @@ def process_single_pair(pair_info):
 
     # --- 3. Materialisation (if not only_vrt) ---
     if not only_vrt:
-        if ifg_path.exists():
+        if ifg_path.exists() and ifg_path.stat().st_size > 0:
             logger.debug("Interferogram already exists: %s", ifg_path.name)
             return (date12, True, f"Interferogram already exists: {ifg_path.name}")
+        if ifg_path.exists():
+            logger.warning("Existing interferogram is empty/partial, "
+                           "re-materialising: %s", ifg_path.name)
+            try:
+                ifg_path.unlink()
+            except OSError:
+                pass
         success = create_interferogram_from_vrt(vrt_path, ifg_path, processor)
         if success:
             return (date12, True, f"Created interferogram: {ifg_path.name}")
@@ -270,8 +313,14 @@ def generate_ifgram(pairs_file, slc_dir_patterns, output_dir, processor,
         burst_slc_dirs = [burst_dirs] if burst_id else burst_dirs
         bust_out = output_dir / burst_id if burst_id else output_dir
 
+        seen: dict = {}
         for _, row in pairs_df.iterrows():
-            date1, date2 = row['date12'].split('-')
+            parts = str(row['date12']).split('-')
+            if len(parts) != 2 or not (len(parts[0]) == 8 and len(parts[1]) == 8):
+                raise ValueError(
+                    f"Malformed date12 in pairs file: {row['date12']!r} "
+                    "(expected YYYYMMDD-YYYYMMDD)")
+            date1, date2 = parts
 
             slc1 = find_slc_file_by_date(burst_slc_dirs, date1, slc_pattern, processor)
             slc2 = find_slc_file_by_date(burst_slc_dirs, date2, slc_pattern, processor)
@@ -281,6 +330,14 @@ def generate_ifgram(pairs_file, slc_dir_patterns, output_dir, processor,
             pair_out.mkdir(parents=True, exist_ok=True)
             vrt_path = pair_out / "fullres.int.vrt"
             ifg_file = ifg_path(bust_out, date1, date2, variant='fullres', processor=processor)
+
+            # dedupe duplicate pair rows (avoids concurrent writes to the
+            # same VRT/ifg path from two workers)
+            dedup_key = (str(vrt_path), str(ifg_file))
+            if dedup_key in seen:
+                logger.warning("Duplicate pair row %s ignored", row['date12'])
+                continue
+            seen[dedup_key] = True
 
             tasks.append((
                 row['date12'], date1, date2, slc1, slc2, vrt_path, ifg_file,

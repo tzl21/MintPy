@@ -256,9 +256,27 @@ class Engine:
         else:
             phase3_base = self.ifgram_dir
 
-        # Pair list for Phase 3 (per-burst pair lists may differ; use the first)
-        phase3_pair_file = pair_files.get(bursts[0]) or pair_files.get(None) \
-            or self.ifgram_dir / 'ifgram_list.txt'
+        # Pair list for Phase 3: the UNION of all per-burst pair lists.
+        # Per-burst date sets can legitimately differ (an acquisition missing
+        # in one burst); using only the first burst's list would silently
+        # skip those pairs' multilook/filter/phsig/unwrap products.
+        phase3_pair_file = self.ifgram_dir / 'ifgram_list.txt'
+        if pair_files:
+            all_pairs = set()
+            for pf in pair_files.values():
+                if pf is not None:
+                    all_pairs.update(self._read_pairs(pf))
+            if not all_pairs:
+                all_pairs = set(self._read_pairs(phase3_pair_file))
+            if pair_files and len(all_pairs) != len(
+                    self._read_pairs(pair_files.get(bursts[0])
+                                     or phase3_pair_file)):
+                logger.info("Phase 3 uses the union of %d burst pair list(s): "
+                            "%d pair(s) (per-burst date sets differ)",
+                            len(pair_files), len(all_pairs))
+            phase3_pair_file = self.engine_dir / 'phase3_pairs.txt'
+            phase3_pair_file.write_text(
+                ''.join(f"{d1}-{d2}\n" for d1, d2 in sorted(all_pairs)))
 
         # ---------------- Phase 3: global chain ----------------
         self._add_uniform_nodes(g, phase3_base, phase3_pair_file, chain)
@@ -427,11 +445,14 @@ class Engine:
     def _add_crop_node(self, g: TaskGraph) -> Path:
         """Add the optional crop_slc node; returns the cropped SLC dir.
 
-        When ``slc2ifg.ifgram_list.start_date`` / ``end_date`` are set, only
-        files whose date falls in the range are cropped (via ``--file-list``).
+        When ``slc2ifg.ifgram_list.start_date`` / ``end_date`` /
+        ``exclude_date`` are set, only date-specific files passing the
+        filter are cropped (via ``--file-list``); non-date assets (e.g.
+        ``static_layers_*.h5``) are always kept.
         """
         cfg = self.config.raw
         from mintpy.stdproc.slc2ifg.engine.config import get_opt
+        from mintpy.stdproc.slc2ifg.ifgram_list import parse_exclude_dates
         from mintpy.stdproc.slc2ifg.utils import naming as _naming
 
         crop_out = get_opt(cfg, 'slc2ifg.crop_slc.output_dir',
@@ -442,35 +463,50 @@ class Engine:
 
         start_date = get_opt(cfg, 'slc2ifg.ifgram_list.start_date')
         end_date = get_opt(cfg, 'slc2ifg.ifgram_list.end_date')
+        exclude_date = get_opt(cfg, 'slc2ifg.ifgram_list.exclude_date')
+        ex_dates = parse_exclude_dates(exclude_date)
 
         inputs = {'slc_dir': self.slc_input}
         # single-burst input: force flat cropped output (no burst nesting)
         if len(discover_bursts(self.slc_input)) <= 1:
             inputs['no_burst_dirs'] = True
-        if start_date or end_date:
+        if start_date or end_date or ex_dates:
             pattern = get_opt(cfg, 'slc2ifg.crop_slc.pattern',
                               fallback=_naming.slc_pattern(self.processor))
             candidates = sorted(self.slc_input.glob(f"**/{pattern}"))
             keep = []
+            skipped = []
             for p in candidates:
                 m = re.search(r'(20\d{6})', p.name)
                 if not m:
+                    # Non-date assets (e.g. static_layers_*.h5 / geometry):
+                    # the date filter only applies to date-specific SLCs,
+                    # so always keep them.
+                    keep.append(str(p))
                     continue
                 d = m.group(1)
                 if start_date and d < str(start_date):
+                    skipped.append(str(p))
                     continue
                 if end_date and d > str(end_date):
+                    skipped.append(str(p))
+                    continue
+                if d in ex_dates:
+                    skipped.append(str(p))
                     continue
                 keep.append(str(p))
             if not keep:
                 raise ValueError(
                     f"No SLC files match the crop date range "
-                    f"[{start_date}, {end_date}] under {self.slc_input}")
+                    f"[{start_date or '-inf'}, {end_date or '+inf'}] "
+                    f"excl {ex_dates} under {self.slc_input}")
             list_file = self.engine_dir / 'crop_file_list.txt'
             list_file.write_text('\n'.join(keep) + '\n')
             inputs['file_list'] = list_file
-            logger.info("crop: %d file(s) in date range [%s, %s]",
-                        len(keep), start_date, end_date)
+            logger.info("crop: %d file(s) in date range [%s, %s] excl %s "
+                        "(%d skipped)",
+                        len(keep), start_date or '-inf', end_date or '+inf',
+                        ','.join(ex_dates) or 'none', len(skipped))
 
         tool = get_tool('crop_slc')
         ctx = ToolContext(
@@ -498,9 +534,11 @@ class Engine:
         mode = get_opt(cfg, 'slc2ifg.ifgram_list.mode', fallback='sequential') or 'sequential'
         start_date = get_opt(cfg, 'slc2ifg.ifgram_list.start_date')
         end_date = get_opt(cfg, 'slc2ifg.ifgram_list.end_date')
+        exclude_date = get_opt(cfg, 'slc2ifg.ifgram_list.exclude_date')
 
         dates = get_date_list(str(slc_dir))
-        dates = filter_date_list(dates, start_date=start_date, end_date=end_date)
+        dates = filter_date_list(dates, start_date=start_date, end_date=end_date,
+                                 exclude_date=exclude_date)
         pair_file = out_dir / 'ifgram_list.txt'
 
         if mode == 'select':
@@ -524,7 +562,12 @@ class Engine:
             nconn = get_int_opt(cfg, 'slc2ifg.ifgram_list.num_connections',
                                 fallback=5) or 5
             oneyear = get_int_opt(cfg, 'slc2ifg.ifgram_list.oneyear_interferograms')
-            pairs = generate_pairs(dates, mode, nconn, oneyear)
+            # annual_windows is the canonical knob for annual/one-year pairs
+            # in ALL modes (template documents it accordingly)
+            aw = get_opt(cfg, 'slc2ifg.ifgram_list.select.annual_windows')
+            pairs = generate_pairs(
+                dates, mode, nconn, oneyear,
+                select_params={'annual_windows': aw} if aw is not None else None)
 
         write_pair_list(pairs, pair_file)
         return pair_file
@@ -564,8 +607,12 @@ class Engine:
                 ('coh_stat', 'str'),
                 ('coh_usable_threshold', 'float'),
                 ('quick_window', 'int'),
+                ('quick_grid', 'int'),
+                ('quick_block', 'int'),
                 ('quick_max_workers', 'int'),
                 ('quick_debias', 'bool'),
+                ('quick_stat', 'str'),
+                ('quick_usable_threshold', 'float'),
                 ('min_degree', 'int'),
                 ('max_pairs', 'int'),
                 ('quality_threshold', 'float'),
@@ -608,8 +655,13 @@ class Engine:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            d1, d2 = line.split('-')
-            pairs.append((d1.strip(), d2.strip()))
+            parts = line.split('-')
+            if len(parts) != 2 or not (
+                    len(parts[0]) == 8 and len(parts[1]) == 8
+                    and parts[0].isdigit() and parts[1].isdigit()):
+                logger.warning("Skipping malformed pair line: %r", line)
+                continue
+            pairs.append((parts[0], parts[1]))
         return pairs
 
     def _make_generate_ifgram_node(self, key: str, burst: Optional[str],
@@ -680,6 +732,12 @@ class Engine:
                     src_keys = [cpx_nodes[(b, dp)] for b in burst_keys if (b, dp) in cpx_nodes]
                     src_paths = [g.nodes[k].ctx.outputs['coh'] for k in src_keys]
                 else:
+                    missing = [b for b in burst_keys if (b, dp) not in ifg_nodes]
+                    if missing:
+                        logger.warning(
+                            "stitch %s: missing burst(s) %s — the stitched "
+                            "product will be PARTIAL (per-burst date sets "
+                            "differ)", dp, ','.join(str(b) for b in missing))
                     src_keys = [ifg_nodes[(b, dp)] for b in burst_keys if (b, dp) in ifg_nodes]
                     src_paths = [g.nodes[k].ctx.outputs['ifg'] for k in src_keys]
                 out_path = self.stitched_dir / dp / f"fullres{ftype}"

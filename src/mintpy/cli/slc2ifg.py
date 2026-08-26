@@ -87,7 +87,7 @@ def main(iargs=None):
     from mintpy import slc2ifg
 
     inps = parse_arguments(iargs)
-    slc2ifg.run_slc2ifg(cfg_file=inps.cfg_file)
+    slc2ifg.run_slc2ifg(cfg_file=inps.cfg_file, template=inps.template)
     return 0
 
 

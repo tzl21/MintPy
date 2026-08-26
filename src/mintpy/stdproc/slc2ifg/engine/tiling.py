@@ -167,16 +167,20 @@ def _atomic_write(output_file: str, fn: Callable[[str], None]) -> str:
     An interrupted run leaves only a ``.tmp`` file — the final path never holds
     a partial/zero product, so the skip-if-exists logic can trust it.
     """
-    tmp = f"{output_file}.tmp"
+    tmp = f"{output_file}.{os.getpid()}.tmp"
     try:
         fn(tmp)
         os.replace(tmp, output_file)
+        tmp_hdr = f"{tmp}.hdr"
+        if os.path.exists(tmp_hdr):
+            os.replace(tmp_hdr, f"{output_file}.hdr")
     except BaseException:
-        try:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        except OSError:
-            pass
+        for stray in (tmp, f"{tmp}.hdr"):
+            try:
+                if os.path.exists(stray):
+                    os.unlink(stray)
+            except OSError:
+                pass
         raise
     return output_file
 
@@ -418,7 +422,10 @@ def goldstein_tiled(
                     ds = None
             if arr is not None:
                 if not np.issubdtype(arr.dtype, np.complexfloating):
-                    arr = arr.astype(np.complex64)
+                    # real-valued phase input: unit-complex conversion, same
+                    # as the reference filter_utils.goldstein (a plain cast
+                    # would filter (phase + 0j) with wrong semantics)
+                    arr = np.exp(1j * arr).astype(np.complex64)
                 arr = np.nan_to_num(arr).astype(np.complex64)
                 # file coords -> padded coords -> block-local coords
                 lr0, lr1 = f_r0 + pad - pr0, f_r1 + pad - pr0

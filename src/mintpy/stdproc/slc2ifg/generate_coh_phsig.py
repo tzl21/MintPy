@@ -38,7 +38,6 @@ from .utils.naming import (
     coh_path,
     extract_date_pair,
     is_date_pair_dir,
-    strip_product_extensions,
     variant_of,
 )
 from .utils.slc2ifg_utils import create_xml_for_binary
@@ -51,7 +50,12 @@ _BATCH_WINDOW_PIXELS = 2_000_000
 
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> logging.Logger:
     logger = logging.getLogger('insarflow.phsig')
-    logger.handlers.clear()
+    for h in list(logger.handlers):
+        try:
+            h.close()
+        except Exception:
+            pass
+        logger.removeHandler(h)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.propagate = False
     formatter = logging.Formatter(
@@ -121,6 +125,10 @@ def estimate_phsig_correlation(
 
     if ps_win % 2 == 0:
         ps_win += 1
+    if grad_win < 2:
+        raise ValueError(
+            f"ps_gradient_window must be >= 2, got {grad_win} "
+            "(grad_win=1 degenerates the slope estimation)")
     if grad_win % 2 == 0:
         grad_win += 1
     ps_half = ps_win // 2
@@ -283,10 +291,17 @@ def _write_band(filename, arr, meta, processor, description=''):
         ds.FlushCache()
         ds = None
         os.replace(tmp, filename)
+        # GDAL's ENVI driver writes a companion '<tmp>.hdr' — rename it along
+        # so the final product keeps its header (else the file is unreadable).
+        tmp_hdr = f"{tmp}.hdr"
+        if os.path.exists(tmp_hdr):
+            os.replace(tmp_hdr, f"{filename}.hdr")
     except BaseException:
         try:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+            if os.path.exists(f"{tmp}.hdr"):
+                os.unlink(f"{tmp}.hdr")
         except OSError:
             pass
         raise
@@ -333,14 +348,16 @@ def process_single_file(input_file, output_dir, params, processor):
     try:
         input_path = Path(input_file)
 
-        sigma_suffix = '.phstd' if processor == 'isce2' else '.phstd.tif'
+        if params.get('keep_sigma'):
+            logger.warning(
+                "keep_sigma is set but the sigma (phase standard deviation) "
+                "product is NOT implemented in the current backend — only "
+                "the coherence product is written")
 
         output_file = _output_path(input_file, output_dir, processor)
-        base = strip_product_extensions(output_file.name, processor)
-        sigma_file = (output_file.parent / f"{base}{sigma_suffix}"
-                      if params.get('keep_sigma') else None)
 
-        if output_file.exists() and (sigma_file is None or sigma_file.exists()):
+        # skip on the coherence product only (sigma is not produced)
+        if output_file.exists():
             logger.info("Skipping existing: %s", output_file)
             return input_file, True, f"Exists: {output_file.name}"
 
@@ -362,8 +379,6 @@ def process_single_file(input_file, output_dir, params, processor):
             create_xml_for_binary(output_file, family='image',
                                   description='Phase-sigma correlation')
 
-        if sigma_file is not None:
-            logger.info("Sigma computation not yet implemented in new backend")
 
         elapsed = time.time() - start_time
         logger.info("Completed in %.1fs: %s", elapsed, output_file.name)

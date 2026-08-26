@@ -26,6 +26,7 @@ Examples:
         --defo-max-cycles 2.0 --nlooks 16.0 --ntiles 2 2 --max-workers 8
 """
 
+import re
 import argparse
 import logging
 import os
@@ -96,6 +97,12 @@ def _open_wbd(wbd_path):
                 parts = line.split()
                 if len(parts) >= 2:
                     meta[parts[0]] = parts[1]
+        required = ('WIDTH', 'FILE_LENGTH', 'X_FIRST', 'Y_FIRST',
+                    'X_STEP', 'Y_STEP')
+        missing_keys = [k for k in required if k not in meta]
+        if missing_keys:
+            raise ValueError(
+                f"wbd .rsc {rsc} missing required key(s): {missing_keys}")
         width = int(float(meta['WIDTH']))
         length = int(float(meta['FILE_LENGTH']))
         x_first = float(meta['X_FIRST'])
@@ -624,8 +631,8 @@ def _snaphu_unwrap(
     if conncomp_out and conncomp_file and os.path.exists(conncomp_file):
         conncomp = np.fromfile(conncomp_file, dtype=np.uint32, count=total_pixels)
         conncomp = conncomp.reshape(ifg_data.shape)
-        # Convert uint32 → uint16 for GDAL compatibility
-        conncomp = conncomp.astype(np.uint16)
+        # Kept as uint32: casting to uint16 would silently wrap above 65535
+        # connected components (GDAL GDT_UInt32 supports uint32 natively).
         if mask_array is not None:
             conncomp[excluded] = 0
 
@@ -722,6 +729,11 @@ def _unwrap_single(
             raise RuntimeError(f"Cannot open {cor_path}")
         corr_data = corr_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
         corr_ds = None
+        if corr_data.shape != (rows, cols):
+            raise ValueError(
+                f"Coherence raster {cor_path} has shape {corr_data.shape}, "
+                f"expected {(rows, cols)} matching the interferogram — "
+                "refusing to run SNAPHU with misaligned weights")
     else:
         # No coherence file: SNAPHU weight = 1 (uniform) — write an
         # all-ones correlation raster so the cost weighting is deterministic.
@@ -744,15 +756,28 @@ def _unwrap_single(
                             int(np.count_nonzero(mask_array == 0)))
         else:
             mask_ds = gdal.Open(str(mask_path), gdal.GA_ReadOnly)
+            if mask_ds is None:
+                raise RuntimeError(f"Cannot open mask {mask_path}")
             mask_array = mask_ds.GetRasterBand(1).ReadAsArray().astype(np.uint8)
             mask_ds = None
+            if mask_array.shape != (rows, cols):
+                raise ValueError(
+                    f"Mask raster {mask_path} has shape {mask_array.shape}, "
+                    f"expected {(rows, cols)} matching the interferogram")
 
     # Initial phase
     init_phase_array = None
     if init_phase_path is not None and init_phase_path.exists():
         ip_ds = gdal.Open(str(init_phase_path), gdal.GA_ReadOnly)
+        if ip_ds is None:
+            raise RuntimeError(f"Cannot open init-phase {init_phase_path}")
         init_phase_array = ip_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
         ip_ds = None
+        if init_phase_array.shape != (rows, cols):
+            raise ValueError(
+                f"Init-phase raster {init_phase_path} has shape "
+                f"{init_phase_array.shape}, expected {(rows, cols)} "
+                "matching the interferogram")
 
     # Scratch directory
     scratch_dir = Path(tempfile.mkdtemp(prefix="snaphu_scratch_"))
@@ -1007,11 +1032,27 @@ def find_matching_files(
     if not cor_files:
         raise FileNotFoundError(
             f"No correlation files in {cor_dir} matching '{cor_pattern}'")
-    if len(ifg_files) != len(cor_files):
+    # Pair by the date-pair key extracted from each filename instead of by
+    # positional order: a single extra/renamed file in either directory used
+    # to silently shift every subsequent pairing.
+    def _dp_key(p: Path):
+        m = re.search(r'(\d{8})_(\d{8})', p.name)
+        return m.group(0) if m else p.name
+    cor_by_dp = {_dp_key(c): c for c in cor_files}
+    paired = []
+    missing = []
+    for f in ifg_files:
+        c = cor_by_dp.get(_dp_key(f))
+        if c is None:
+            missing.append(f.name)
+            continue
+        paired.append((f, c))
+    if missing:
         raise ValueError(
-            f"Count mismatch: {len(ifg_files)} ifgs vs {len(cor_files)} cors")
-
-    return ifg_files, cor_files
+            f"{len(missing)} interferogram(s) have no matching coherence "
+            f"file: {', '.join(missing[:8])}")
+    ifg_out, cor_out = zip(*paired) if paired else ([], [])
+    return list(ifg_out), list(cor_out)
 
 
 # ------------------------------------------------------------------------

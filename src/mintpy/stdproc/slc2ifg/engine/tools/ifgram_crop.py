@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 from typing import Dict
 
@@ -39,6 +41,7 @@ class IfgramListTool(Tool):
                   cfg='slc2ifg.ifgram_list.oneyear_interferograms', kind='int'),
         ParamSpec('start_date', cfg='slc2ifg.ifgram_list.start_date'),
         ParamSpec('end_date', cfg='slc2ifg.ifgram_list.end_date'),
+        ParamSpec('exclude_date', cfg='slc2ifg.ifgram_list.exclude_date'),
     ] + [
         ParamSpec(name, cfg=f'slc2ifg.ifgram_list.select.{name}',
                   kind=kind)
@@ -72,6 +75,7 @@ class IfgramListTool(Tool):
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
         from mintpy.stdproc.slc2ifg.ifgram_list import (
+            filter_date_list,
             generate_pairs,
             get_date_list,
             write_pair_list,
@@ -80,6 +84,12 @@ class IfgramListTool(Tool):
         out = ctx.output('pairs_file')
         out.parent.mkdir(parents=True, exist_ok=True)
         dates = get_date_list(str(ctx.input('slc_dir')))
+        dates = filter_date_list(
+            dates,
+            start_date=ctx.param('start_date'),
+            end_date=ctx.param('end_date'),
+            exclude_date=ctx.param('exclude_date'),
+        )
         mode = ctx.param('mode', 'sequential')
 
         if mode == 'select':
@@ -120,11 +130,14 @@ class IfgramListTool(Tool):
                 report.get('rank'), report.get('min_degree_actual'),
                 report.get('weight_source'))
         else:
+            # annual_windows applies to ALL modes (canonical knob)
+            aw = ctx.param('annual_windows')
             pairs = generate_pairs(
                 dates,
                 mode=mode,
                 num_connections=ctx.param('num_connections', 5),
                 oneyear_range=ctx.param('oneyear_interferograms'),
+                select_params={'annual_windows': aw} if aw is not None else None,
             )
         write_pair_list(pairs, out)
         return {'pairs_file': out}
@@ -159,6 +172,10 @@ class CropSlcTool(Tool):
 
         processor = ctx.param('processor')
         in_dir = Path(ctx.input('slc_dir'))
+        # cap the crop-internal worker pool (the engine injects its own
+        # max_workers here — reusing n_cpu inside n_cpu dask threads would
+        # oversubscribe the node)
+        workers = max(1, min(int(ctx.param('max_workers', 1) or 1), 4))
         out_dir = ctx.output('slc_dir')
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -175,20 +192,20 @@ class CropSlcTool(Tool):
                 '--input-dir', str(in_dir),
                 '--file-list', str(file_list),
                 '--output-dir', str(out_dir),
-                '--wsen'] + [str(x) for x in str(wsen).split()] + [
+                '--wsen'] + [x for x in re.split(r'[\s,]+', str(wsen)) if x.strip()] + [
                 '--buffer', str(ctx.param('buffer', 0.0)),
                 '--prefix', str(ctx.param('prefix', '')),
-                '--max-workers', str(ctx.param('max_workers', 1)),
+                '--max-workers', str(workers),
             ]
         else:
             args_list = [
                 '--input-dir', str(in_dir),
                 '--output-dir', str(out_dir),
-                '--wsen'] + [str(x) for x in str(wsen).split()] + [
+                '--wsen'] + [x for x in re.split(r'[\s,]+', str(wsen)) if x.strip()] + [
                 '--pattern', ctx.param('pattern', naming.slc_pattern(processor)),
                 '--buffer', str(ctx.param('buffer', 0.0)),
                 '--prefix', str(ctx.param('prefix', '')),
-                '--max-workers', str(ctx.param('max_workers', 1)),
+                '--max-workers', str(workers),
             ]
         if ctx.param('geom_dir'):
             args_list += ['--geom-dir', str(ctx.param('geom_dir'))]

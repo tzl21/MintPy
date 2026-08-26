@@ -55,7 +55,7 @@ def _template_file() -> Path:
         return Path(str(ref))
     except (ImportError, ModuleNotFoundError):
         # fallback: engine source tree (uninstalled checkout / tests)
-        return Path(__file__).resolve().parents[2] / 'slc2ifg' / 'template' / 'slc2ifg.cfg'
+        return Path(__file__).resolve().parents[1] / 'slc2ifg' / 'template' / 'slc2ifg.cfg'
 
 
 
@@ -70,8 +70,10 @@ def _clean_config_value(raw: str) -> str:
     """
     if raw.startswith('\ufeff'):
         raw = raw[1:]
-    if '#' in raw:
-        raw = raw.split('#')[0]
+    # Treat '#' as an inline comment only when preceded by whitespace, so
+    # legitimate values containing '#' (e.g. URL fragments) survive.
+    if ' #' in raw:
+        raw = raw.split(' #', 1)[0]
     return raw.strip()
 
 
@@ -80,7 +82,7 @@ def get_opt(config: configparser.ConfigParser, key: str,
     """Get string option from the 'slc2ifg' section."""
     if config.has_option('slc2ifg', key):
         cleaned = _clean_config_value(config.get('slc2ifg', key))
-        if cleaned.lower() == 'auto' or cleaned == '':
+        if cleaned.lower() in ('auto', 'none', 'null', 'off', '') :
             return fallback
         return cleaned
     return fallback
@@ -102,7 +104,7 @@ def get_int_opt(config: configparser.ConfigParser, key: str,
     """Get integer option from the 'slc2ifg' section."""
     if config.has_option('slc2ifg', key):
         cleaned = _clean_config_value(config.get('slc2ifg', key))
-        if cleaned.lower() == 'auto' or cleaned == '':
+        if cleaned.lower() in ('auto', 'none', 'null', 'off', ''):
             return fallback
         try:
             return int(cleaned)
@@ -117,7 +119,7 @@ def get_float_opt(config: configparser.ConfigParser, key: str,
     """Get float option from the 'slc2ifg' section."""
     if config.has_option('slc2ifg', key):
         cleaned = _clean_config_value(config.get('slc2ifg', key))
-        if cleaned.lower() == 'auto' or cleaned == '':
+        if cleaned.lower() in ('auto', 'none', 'null', 'off', ''):
             return fallback
         try:
             return float(cleaned)
@@ -148,7 +150,7 @@ def read_config(user_config_file: Optional[str]) -> configparser.ConfigParser:
     ``RawConfigParser`` is used so ``%`` in comments/values is never treated
     as interpolation syntax.
     """
-    config = configparser.RawConfigParser()
+    config = configparser.RawConfigParser(strict=False)
 
     template_file = _template_file()
     if template_file.exists():
@@ -299,6 +301,10 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
     slc_input = get_opt(config, 'slc2ifg.slc_input')
     if not slc_input:
         raise ValueError("Missing required configuration: slc2ifg.slc_input")
+    slc_path = Path(slc_input)
+    if not slc_path.is_absolute():
+        cfg_dir = getattr(config, 'config_dir', str(Path.cwd()))
+        slc_path = (Path(cfg_dir) / slc_path).resolve()
 
     # --- engine section: processing chain ---
     # engine.stages is the single authoritative chain spec.  The legacy
@@ -339,7 +345,7 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
         if keep_variants_cfg else []
 
     return EngineConfig(
-        slc_input=str(Path(slc_input)),
+        slc_input=str(slc_path),
         work_dir=work_path,
         engine_work_dir=engine_work_path,
         processor=processor,
