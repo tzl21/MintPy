@@ -347,3 +347,51 @@ def test_no_auto_tile_when_gpu_disabled(tmp_path, monkeypatch):
     config.gpu = 'false'
     eng = Engine(config)
     assert eng.config.tile_size is None
+
+
+# ------------------------------------------------------------------------
+# GPU-vs-CPU kernel parity (guards against cupy/numpy mixing regressions)
+# ------------------------------------------------------------------------
+def test_gpu_kernels_parity_with_cpu():
+    """GPU kernels must run without cupy/numpy mixing errors and match the
+    CPU references to float32 precision (regression: a numpy array indexed
+    with a cupy boolean mask made every GPU goldstein task fall back to
+    slow CPU filtering).  Skips when cupy has no usable device."""
+    import numpy as np
+
+    try:
+        from mintpy.stdproc.slc2ifg.engine import gpu_kernels as gk
+        if not gk.cupy_available():
+            pytest.skip('no usable GPU device')
+    except Exception:
+        pytest.skip('cupy/gpu_kernels not importable')
+
+    rng = np.random.default_rng(42)
+
+    # 1. complex coherence
+    s1 = (rng.random((256, 256)) + 1j * rng.random((256, 256))).astype(np.complex64)
+    s2 = (rng.random((256, 256)) + 1j * rng.random((256, 256))).astype(np.complex64)
+    c_gpu = gk.complex_coh_block(s1, s2, 5, gpu=True)
+    c_cpu = gk.complex_coh_block(s1, s2, 5, gpu=False)
+    assert np.max(np.abs(c_gpu - c_cpu)) < 1e-5
+
+    # 2. phase-sigma correlation (nodata corner included)
+    ifg = (rng.random((256, 256)) + 1j * rng.random((256, 256))).astype(np.complex64)
+    ifg[:16, :16] = 0
+    p_gpu = gk.estimate_phsig_block(ifg, 5, 5, 8.0, gpu=True)
+    p_cpu = gk.estimate_phsig_block(ifg, 5, 5, 8.0, gpu=False)
+    assert np.max(np.abs(p_gpu - p_cpu)) < 1e-5
+
+    # 3. goldstein filter (all-nodata corner must not inflate the norm)
+    block = (rng.random((256, 256)) + 1j * rng.random((256, 256))).astype(np.complex64)
+    block[:16, :16] = 0
+    nd = np.abs(block) < 1e-6
+    psize = 32
+    wf = np.outer(np.hanning(psize), np.hanning(psize))
+    f_gpu, n_gpu = gk.goldstein_block(block, nd, 0.8, psize, wf, (0, 0), gpu=True)
+    f_cpu, n_cpu = gk.goldstein_block(block, nd, 0.8, psize, wf, (0, 0), gpu=False)
+    assert np.max(np.abs(n_gpu - n_cpu)) < 1e-5
+    denom = np.abs(f_gpu) + np.abs(f_cpu)
+    rel = np.abs(f_gpu - f_cpu) / np.maximum(denom, 1e-30)
+    assert rel.max() < 1e-4, 'goldstein GPU/CPU relative deviation too large'
+    assert n_gpu[0, 0] == 0.0, 'all-nodata patch corner must not add norm'
