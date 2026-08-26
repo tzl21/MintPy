@@ -348,13 +348,14 @@ def _old_total_greedy(dates, cand, weights, min_degree):
 
 
 def test_max_mean_priority_over_total():
-    """Given min_degree, selection maximises the *mean* coherence (not the
-    total): it keeps adding above-mean edges even after every date already
-    reaches min_degree.  The mean must never be lower than the old
-    total-greedy, connectivity and degree>=min_degree must hold, and on a
-    crafted case an above-mean edge that is not needed for min_degree must
-    still be kept."""
-    # random instances: new mean >= old mean, constraints preserved
+    """Given min_degree, selection keeps adding above-mean edges even after
+    every date reaches min_degree (maximising the *mean*, not the total), and
+    connectivity + degree>=min_degree hold.  Because degree-filling is done
+    first (a hard guarantee, see test_min_degree_satisfied_within_budget), the
+    mean is within a small tolerance of the old total-greedy rather than being
+    strictly >= in every instance; on a crafted case an above-mean edge that is
+    not needed for min_degree must still be kept."""
+    # random instances: mean near old total-greedy, constraints preserved
     for seed in range(12):
         cand = generate_candidates(DATES, num_connections=3, annual_windows=())
         w = _random_weights(DATES, cand, seed=seed)
@@ -364,8 +365,11 @@ def test_max_mean_priority_over_total():
         assert rep['min_degree_actual'] >= 2
         new_mean = float(np.mean([w[p] for p in sel]))
         old_mean = float(np.mean([w[p] for p in old]))
-        assert new_mean >= old_mean - 1e-9, \
-            f"seed={seed}: new mean {new_mean} < old {old_mean}"
+        # degree-fill-first may pick slightly different (lower-mean) edges than
+        # the old total-greedy; allow a small tolerance while still catching a
+        # broken above-mean augmentation (which would regress much more).
+        assert new_mean >= old_mean - 0.02, \
+            f"seed={seed}: new mean {new_mean} << old {old_mean}"
 
     # crafted case: an above-mean edge is kept even though every date already
     # reached degree 2 without it (old greedy dropped it -> lower mean)
@@ -381,6 +385,37 @@ def test_max_mean_priority_over_total():
     assert rep['selected_weight_mean'] > 0.66
     assert check_connected(dates, sel)
     assert rep['min_degree_actual'] >= 2
+
+
+def test_min_degree_satisfied_within_budget():
+    """Within a tight max_pairs budget, every date must still reach
+    min_degree whenever the budget is at least the degree lower bound (N*d/2).
+    Degree-filling is done before above-mean edge addition, so low-coherence
+    dates are not starved by high-coherence edges on already-dense dates."""
+    n = 20
+    rng = np.random.default_rng(3)
+    dates = [f"{20240000 + (i + 1) * 12:08d}" for i in range(n)]
+    cand = [(dates[i], dates[j]) for i in range(n) for j in range(i + 1, n)]
+    bad = set(dates[3:7]) | {dates[15]}
+    w = {}
+    for a, b in cand:
+        w[(a, b)] = float(rng.uniform(0.5, 1.0))
+        if a in bad or b in bad:
+            w[(a, b)] = float(rng.uniform(0.05, 0.2))
+
+    min_degree = 4
+    budget = 52  # >= n*4/2 = 40 minimum, tight but sufficient
+    for _ in range(3):
+        sel, rep = select_ifgrams(dates, cand, w, min_degree=min_degree,
+                                  max_pairs=budget)
+        deg = {d: 0 for d in dates}
+        for a, b in sel:
+            deg[a] += 1
+            deg[b] += 1
+        assert check_connected(dates, sel)
+        assert len(sel) <= budget
+        assert min(deg.values()) >= min_degree, \
+            f"dates below min_degree: {[d for d in dates if deg[d] < min_degree]}"
 
 
 def test_min_degree_enforced():
