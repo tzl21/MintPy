@@ -109,6 +109,15 @@ class ComplexCohTool(Tool):
             if s1.shape != s2.shape:
                 raise ValueError(f"Dimension mismatch: {s1.shape} vs {s2.shape}")
             coh = complex_coh_block(s1, s2, window, gpu=use_gpu)
+            # Zero the outer window//2 border, matching the tiled path's
+            # margin zeroing and the reference CoherenceEstimator (partial
+            # windows at the border are biased and must not be emitted).
+            half = window // 2
+            if half > 0:
+                coh[:half, :] = 0
+                coh[-half:, :] = 0
+                coh[:, :half] = 0
+                coh[:, -half:] = 0
             write_coherence_image(str(out), coh, meta, processor)
             if processor == 'isce2':
                 create_xml_for_binary(out, family='image',

@@ -214,8 +214,14 @@ def stitch_arrays(
             logger.warning(f"Cannot open {fp}, skipping")
             continue
         gt = ds.GetGeoTransform()
+        p_wkt = ds.GetProjection()
         if proj_wkt is None:
-            proj_wkt = ds.GetProjection()
+            proj_wkt = p_wkt
+        elif p_wkt and p_wkt != proj_wkt:
+            raise ValueError(
+                f"stitch_arrays: source {fp} has a different CRS than the "
+                "first file (docstring contract: all sources must share "
+                "CRS and resolution)")
         if sample_dtype is None:
             band = ds.GetRasterBand(1)
             if band is not None:
@@ -238,6 +244,13 @@ def stitch_arrays(
     dy = pieces[0]['dy']
     if sample_dtype is None:
         sample_dtype = np.float32
+    # validate uniform pixel resolution across sources (docstring contract)
+    bad_res = [p['path'] for p in pieces
+               if abs(p['dx'] - dx) > 1e-6 or abs(p['dy'] - dy) > 1e-6]
+    if bad_res:
+        raise ValueError(
+            "stitch_arrays: %d source(s) have a different pixel resolution "
+            "than the first file: %s", len(bad_res), bad_res[:3])
 
     # Union extent of all sources
     # Union extent of all sources (used to clamp a bbox to the data)

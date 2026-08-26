@@ -136,8 +136,13 @@ slc2ifg = [
 # lives inside mintpy.stdproc.slc2ifg.engine; dask is a hard engine dep,
 # cupy is only needed for GPU kernels (engine degrades to CPU without it).
 engine = [
-    "dask[distributed]>=2023",
+    "dask>=2023",
     "tqdm>=4.60",
+]
+# GPU kernels (cupy) are optional: the engine degrades to CPU without them,
+# so CPU-only installs should not be forced to pull the CUDA stack.
+engine-gpu = [
+    "mintpy[engine]",
     "cupy-cuda12x>=13",
 ]
 

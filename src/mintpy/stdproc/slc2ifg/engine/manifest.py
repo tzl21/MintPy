@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -161,17 +162,52 @@ def plan_cleanup(
     to_delete = []
     for p in manifest.produced_files(deleted=False):
         name = p.name
-        if any(name.endswith(s) for s in keep_suffixes):
+        if _kept_by_name(name, keep_suffixes, keep_variants):
             continue
-        if any(name.startswith(v) or f"_{v}." in name for v in keep_variants):
+        if _kept_by_node(p, keep_nodes, manifest):
             continue
-        node = manifest._entries.get(str(p.resolve()), {}).get('node', '')
-        # entries store the full node key ('generate_ifgram#single#20240101_20240119');
-        # the keep_policy lists tool/stage names — match on the tool part
-        if node.split('#', 1)[0] in keep_nodes:
+        if p.is_dir() and _dir_contains_kept(
+                p, keep_suffixes, keep_variants, keep_nodes, manifest):
+            # A directory physically containing any kept final product
+            # (e.g. unw/conncomp/phsig inside ``{date1}_{date2}/``) must
+            # NOT be removed recursively — rmtree would destroy the kept
+            # product along with the intermediates.
             continue
         to_delete.append(p)
     return to_delete
+
+
+def _kept_by_name(name: str, keep_suffixes: List[str],
+                  keep_variants: List[str]) -> bool:
+    """Whether a filename is protected by the suffix / variant keep rules."""
+    if any(name.endswith(s) for s in keep_suffixes):
+        return True
+    if any(name.startswith(v) or f"_{v}." in name for v in keep_variants):
+        return True
+    return False
+
+
+def _kept_by_node(p: Path, keep_nodes, manifest) -> bool:
+    """Whether a recorded product is protected by the stage-name keep rule."""
+    if not keep_nodes:
+        return False
+    node = manifest._entries.get(str(p.resolve()), {}).get('node', '')
+    return node.split('#', 1)[0] in keep_nodes
+
+
+def _dir_contains_kept(dirpath: Path, keep_suffixes: List[str],
+                       keep_variants: List[str], keep_nodes,
+                       manifest) -> bool:
+    """True if any file under ``dirpath`` is protected by the keep policy."""
+    for root, _dirs, files in os.walk(dirpath):
+        rootp = Path(root)
+        for fn in files:
+            fp = rootp / fn
+            if _kept_by_name(fn, keep_suffixes, keep_variants):
+                return True
+            if _kept_by_node(fp, keep_nodes, manifest):
+                return True
+    return False
 
 
 #: Companion files that must be removed together with a deleted product.

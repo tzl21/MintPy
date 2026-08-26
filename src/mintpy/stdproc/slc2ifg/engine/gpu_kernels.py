@@ -436,8 +436,12 @@ def _goldstein_gpu(block, nodata_mask, alpha, psize, wf, origin):
         out_c_np = cp.asnumpy(out_c.ravel())
         np.add.at(filt_re, (out_r_np, out_c_np), contrib_np.real.ravel())
         np.add.at(filt_im, (out_r_np, out_c_np), contrib_np.imag.ravel())
-        np.add.at(norm, (out_r_np, out_c_np),
-                  np.broadcast_to(wf_np, (nb, psize, psize)).ravel())
+        # all-nodata patches contribute NEITHER the filtered value (already 0)
+        # NOR the norm weight — the CPU kernels skip them entirely, so the
+        # GPU norm must not be inflated by their triangle window either.
+        wf_scatter = np.broadcast_to(wf_np, (nb, psize, psize)).copy()
+        wf_scatter[all_nd] = 0.0
+        np.add.at(norm, (out_r_np, out_c_np), wf_scatter.ravel())
 
     filtered = (filt_re + 1j * filt_im).astype(np.complex64)
 

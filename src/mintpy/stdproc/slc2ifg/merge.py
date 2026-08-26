@@ -332,26 +332,29 @@ def prepare_stitching_parameters_with_epsg_conversion(
         logger.info(f"Output bounds EPSG: {args.out_bounds_epsg}")
         logger.info(f"Destination EPSG: {args.dest_epsg}")
 
-        if input_epsg and args.out_bounds_epsg != input_epsg:
-            try:
-                converted_bounds = convert_bounds_to_target_epsg(
-                    bounds, args.out_bounds_epsg, input_epsg
-                )
-                params["out_bounds"] = converted_bounds
-                params["dest_epsg"] = input_epsg
-                logger.info(f"Original bounds: {bounds}")
-                logger.info(f"Converted bounds: {converted_bounds}")
-            except Exception as e:
-                logger.error(f"Failed to convert bounds: {e}")
-                params.pop("out_bounds", None)
-                params.pop("out_bounds_epsg", None)
-        elif input_epsg:
-            params["out_bounds"] = bounds
+        # ``stitch_arrays`` requires the bounds in EPSG:4326 (it reprojects
+        # them to the output CRS internally) — convert the user bounds to
+        # 4326 here.  Pre-converting to the *input* CRS used to cause a
+        # double transformation on UTM inputs, and a conversion failure used
+        # to silently drop the crop box (full-union merge).
+        try:
+            bounds4326 = convert_bounds_to_target_epsg(
+                bounds, args.out_bounds_epsg or 4326, 4326
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to convert out_bounds {bounds} "
+                f"(EPSG:{args.out_bounds_epsg}) to EPSG:4326: {e}"
+            ) from e
+        params["out_bounds"] = bounds4326
+        params["out_bounds_epsg"] = 4326
+        if input_epsg:
             params["dest_epsg"] = input_epsg
+            logger.info(f"Output bounds (EPSG:4326): {bounds4326}")
         else:
-            logger.warning("Cannot determine input EPSG. Using bounds as-is.")
-            params["out_bounds"] = bounds
-            params["out_bounds_epsg"] = args.out_bounds_epsg
+            logger.warning(
+                "Cannot determine input EPSG — the merged product CRS will "
+                "follow the first input file")
 
     elif args.dest_epsg is not None:
         params["dest_epsg"] = args.dest_epsg

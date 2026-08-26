@@ -17,6 +17,7 @@ inside ``run()``, with no changes needed outside this file.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Dict
 
 from mintpy.stdproc.slc2ifg.engine.tool import (
@@ -82,18 +83,42 @@ class AtmosphereTool(Tool):
                 f"(skeleton supports 'none'); plug your correction package "
                 f"into AtmosphereTool.run")
 
-        drv = gdal.GetDriverByName('GTiff')
-        out_ds = drv.Create(str(out), ds.RasterXSize, ds.RasterYSize, 1,
-                            band.DataType,
-                            options=['COMPRESS=LZW', 'TILED=YES'])
-        if out_ds is None:
-            raise RuntimeError(f"atmosphere: failed to create {out}: "
-                               f"{gdal.GetLastErrorMsg()}")
-        out_ds.SetGeoTransform(ds.GetGeoTransform())
-        out_ds.SetProjection(ds.GetProjection())
-        out_ds.GetRasterBand(1).WriteArray(corrected)
-        out_ds.FlushCache()
-        out_ds = None
+        processor = ctx.param('processor', 'isce3')
+        driver_name = 'GTiff' if processor == 'isce3' else 'ENVI'
+        drv = gdal.GetDriverByName(driver_name)
+        # atomic write: create at '<out>.tmp' and rename on success
+        tmp = f"{out}.{os.getpid()}.tmp"
+        try:
+            out_ds = drv.Create(tmp, ds.RasterXSize, ds.RasterYSize, 1,
+                                band.DataType,
+                                options=([] if processor == 'isce2'
+                                         else ['COMPRESS=LZW', 'TILED=YES']))
+            if out_ds is None:
+                raise RuntimeError(
+                    f"atmosphere: failed to create {out}: "
+                    f"{gdal.GetLastErrorMsg()}")
+            out_ds.SetGeoTransform(ds.GetGeoTransform())
+            out_ds.SetProjection(ds.GetProjection())
+            out_ds.GetRasterBand(1).WriteArray(corrected)
+            out_ds.FlushCache()
+            out_ds = None
+            os.replace(tmp, str(out))
+            tmp_hdr = f"{tmp}.hdr"
+            if os.path.exists(tmp_hdr):
+                os.replace(tmp_hdr, f"{out}.hdr")
+            if processor == 'isce2':
+                from mintpy.stdproc.slc2ifg.utils.slc2ifg_utils import (
+                    create_xml_for_binary)
+                create_xml_for_binary(out, family='image',
+                                      description='Atmosphere-corrected phase')
+        except BaseException:
+            for stray in (tmp, f"{tmp}.hdr"):
+                try:
+                    if os.path.exists(stray):
+                        os.unlink(stray)
+                except OSError:
+                    pass
+            raise
         ds = None
 
         ctx.logger.info("atmosphere (%s): %s/%s", method,

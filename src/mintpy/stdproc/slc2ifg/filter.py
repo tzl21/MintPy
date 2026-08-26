@@ -267,6 +267,10 @@ def auto_filter_output_name(input_file, output_dir, processor):
             # already filtered: overwrite in place (idempotent re-run)
             return output_dir / date_pair / input_path.name
         return output_dir / date_pair / f"{out_variant}{int_ext(processor)}"
+    if is_date_pair_dir(date_pair):
+        # include the date pair so different pairs never collide on the
+        # same flat output name (e.g. unwrapped inputs of several pairs)
+        return output_dir / f"filtered_{date_pair}_{input_path.stem}{input_path.suffix}"
     return output_dir / f"filtered_{input_path.stem}{input_path.suffix}"
 
 
@@ -352,6 +356,8 @@ def process_long_wavelength_files(input_files, output_dir, args, cor_files=None,
         temporal_coherence_filename=temporal_coherence_file,
         wavelength_cutoff=args.wavelength_cutoff,
         correlation_cutoff=args.correlation_cutoff,
+        pixel_spacing=args.pixel_spacing,
+        fill_value=args.fill_value,
         output_dir=output_dir,
         max_workers=args.max_workers
     )

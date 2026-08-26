@@ -17,8 +17,11 @@ import re
 import logging
 from datetime import datetime, timedelta
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging ONLY when the host app has no handlers yet (importing
+# this module must not clobber the caller's logging setup).
+if not logging.root.handlers:
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -327,6 +330,11 @@ def create_parser():
                              help='Only keep dates >= YYYYMMDD (inclusive)')
     network_group.add_argument('--end-date', type=str, dest='end_date', default=None,
                              help='Only keep dates <= YYYYMMDD (inclusive)')
+    network_group.add_argument('--exclude-date', type=str, dest='exclude_date',
+                             action='append', default=None,
+                             help='Exclude specific SLC date(s) YYYYMMDD (e.g. bad '
+                                  'acquisitions); repeatable and/or comma/space '
+                                  'separated')
     network_group.add_argument('--processor', type=str, choices=['isce2', 'isce3'], default='isce3',
                              help='Processor type for quick coherence in select mode (default: isce3)')
 
@@ -461,15 +469,22 @@ def get_date_list(slc_dir):
         raise ValueError(f"SLC directory does not exist: {slc_dir}")
     
     # Search for all files and directories recursively
+    _SLC_EXTS = ('.slc', '.slc.tif', '.tif', '.tiff', '.h5', '.hdf5',
+                 '.slc.full', '.rdr', '.int', '.int.tif')
     for root, dirs, files in os.walk(slc_dir):
-        # Check directory names for dates
+        # Directory names must be EXACTLY an 8-digit date — a pair-named
+        # directory like 20200101_20200113 must not inject spurious dates.
         for dir_name in dirs:
-            date = extract_date_from_string(dir_name)
-            if date:
-                date_set.add(date)
-        
-        # Check file names for dates
+            if DATE_PATTERN.fullmatch(dir_name):
+                date = extract_date_from_string(dir_name)
+                if date:
+                    date_set.add(date)
+
+        # File names: only accept SLC-like extensions (the primary path used
+        # to pick dates out of ANY file, e.g. stray pair-named products).
         for file_name in files:
+            if not file_name.lower().endswith(_SLC_EXTS):
+                continue
             date = extract_date_from_string(file_name)
             if date:
                 date_set.add(date)
@@ -488,13 +503,52 @@ def get_date_list(slc_dir):
     return date_list
 
 
-def filter_date_list(date_list, start_date=None, end_date=None):
-    """Keep dates within ``[start_date, end_date]`` (YYYYMMDD, inclusive).
+def parse_exclude_dates(exclude_date):
+    """Normalize ``exclude_date`` into a sorted list of ``YYYYMMDD`` strings.
+
+    Accepts ``None`` / ``'auto'`` / ``'none'`` / ``''`` (no exclusion),
+    a comma- and/or whitespace-separated string of dates (e.g.
+    ``'20200101, 20200615'``), or a list of date strings (programmatic
+    API). Invalid entries are dropped with a warning.
+    """
+    if exclude_date is None:
+        return []
+    if isinstance(exclude_date, str):
+        v = exclude_date.strip()
+        if v.lower() in ('', 'auto', 'none', 'off', 'no', '0', 'false'):
+            return []
+        raw = re.split(r'[,\s]+', v)
+    elif isinstance(exclude_date, (int, float)):
+        raw = [str(exclude_date)]
+    else:
+        raw = list(exclude_date)
+    out = []
+    for d in raw:
+        d = str(d).strip()
+        if not d:
+            continue
+        try:
+            dt = datetime.strptime(d, '%Y%m%d')
+        except ValueError:
+            logger.warning("Invalid exclude date, ignored: %r", d)
+            continue
+        out.append(dt.strftime('%Y%m%d'))
+    return sorted(set(out))
+
+
+def filter_date_list(date_list, start_date=None, end_date=None, exclude_date=None):
+    """Keep dates within ``[start_date, end_date]`` (YYYYMMDD, inclusive)
+    and drop the dates listed in ``exclude_date``.
 
     Dates are compared as strings (zero-padded YYYYMMDD sorts lexically).
+    ``exclude_date`` accepts ``None`` / ``'auto'`` / comma-or-space
+    separated ``YYYYMMDD`` dates / a list of date strings; e.g.
+    ``'20200101,20200615'`` removes bad acquisitions from the network
+    *before* pairing so no interferogram involves them.
     Returns a new sorted list.
     """
-    if start_date is None and end_date is None:
+    ex_dates = parse_exclude_dates(exclude_date)
+    if start_date is None and end_date is None and not ex_dates:
         return list(date_list)
     out = []
     for d in sorted(date_list):
@@ -502,9 +556,16 @@ def filter_date_list(date_list, start_date=None, end_date=None):
             continue
         if end_date and d > str(end_date):
             continue
+        if d in ex_dates:
+            continue
         out.append(d)
-    logger.info("Date filter [%s, %s]: %d date(s) kept",
-                start_date or '-inf', end_date or '+inf', len(out))
+    logger.info("Date filter [%s, %s] excl [%s]: %d date(s) kept",
+                start_date or '-inf', end_date or '+inf',
+                ','.join(ex_dates) or 'none', len(out))
+    missing = sorted(set(ex_dates) - set(date_list))
+    if missing:
+        logger.warning("Exclude date(s) not found in the SLC date list "
+                       "(ignored): %s", ','.join(missing))
     return out
 
 
@@ -582,16 +643,18 @@ def generate_pairs(date_list, mode, num_connections, oneyear_range=None,
 
 
 def write_pair_list(pairs, output_file):
-    """Write pairs to output file."""
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    
-    with open(output_file, 'w') as f:
+    """Write pairs to output file (atomically: temp file + rename)."""
+    out_path = os.path.abspath(output_file)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    tmp = f"{out_path}.tmp"
+    with open(tmp, 'w') as f:
         f.write("# Interferometric pairs generated by ifgram_list.py\n")
         f.write("# Date12\n")
-        
         for date1, date2 in pairs:
             f.write(f"    {date1}-{date2}\n")
-    
+    os.replace(tmp, out_path)
     logger.info(f"Wrote {len(pairs)} pairs to {output_file}")
     return output_file
 
@@ -642,11 +705,12 @@ def main(args=None):
         # Get date list
         date_list = get_date_list(args.slc_dir)
 
-        # Optional date-range filter
+        # Optional date-range / exclusion filter
         date_list = filter_date_list(
             date_list,
             start_date=getattr(args, 'start_date', None),
             end_date=getattr(args, 'end_date', None),
+            exclude_date=getattr(args, 'exclude_date', None),
         )
 
         output_file = os.path.join(args.out_dir, 'ifgram_list.txt')
@@ -667,7 +731,9 @@ def main(args=None):
                 mode=args.mode,
                 num_connections=args.num_connections
                 if args.num_connections is not None else DEFAULT_NUM_CONNECTIONS,
-                oneyear_range=args.oneyear_interferograms
+                oneyear_range=args.oneyear_interferograms,
+                select_params={'annual_windows': args.select_annual_windows}
+                if getattr(args, 'select_annual_windows', None) else None,
             )
         
         # Write pair list

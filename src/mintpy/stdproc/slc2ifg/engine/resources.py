@@ -27,32 +27,22 @@ logger = logging.getLogger(__name__)
 # GPU detection
 # ------------------------------------------------------------------------
 def gpu_available() -> bool:
-    """Return True if a usable GPU backend (cupy or numba.cuda) is present."""
-    try:
-        import cupy  # noqa: F401
-        return True
-    except ImportError:
-        pass
-    try:
-        from numba import cuda  # noqa: F401
-        return cuda.is_available()
-    except ImportError:
-        return False
+    """Return True if a usable GPU device is actually present."""
+    return gpu_count() > 0
 
 
 def gpu_count() -> int:
-    """Number of usable GPUs (1 if any backend reports devices)."""
+    """Number of usable GPUs (0 when none — a CPU box must never report 1)."""
     try:
         import cupy
-        return max(1, cupy.cuda.runtime.getDeviceCount())
+        return int(cupy.cuda.runtime.getDeviceCount())
     except Exception:
         pass
     try:
         from numba import cuda
-        n = len(cuda.gpus)
-        return max(1, n) if n else 0
+        return int(len(cuda.gpus))
     except Exception:
-        return 1 if gpu_available() else 0
+        return 0
 
 
 # ------------------------------------------------------------------------

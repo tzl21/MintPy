@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional
 
 # Ensure src/ is in sys.path when run directly
-_src_root = Path(__file__).resolve().parents[2]
+_src_root = Path(__file__).resolve().parents[3]
 if str(_src_root) not in sys.path:
     sys.path.insert(0, str(_src_root))
 
