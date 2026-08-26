@@ -391,12 +391,16 @@ def _execute_distributed(graph: TaskGraph, order: List[str],
             # (``resources={'GPU': 1}``), NOT by the client-side GpuPool —
             # the pool is a threading semaphore that cannot be pickled to
             # the workers, so ``None`` is passed to the remote task.
+            # Serialize ONLY the node being executed (a single-node graph),
+            # not the whole DAG: pickling the full graph per task used to be
+            # O(N^2) serialization on large runs.
+            mini = {key: graph.nodes[key]}
             if node.tool.resource.device == 'gpu':
                 tasks[key] = client.submit(
-                    _run_node, key, graph, None, *deps,
+                    _run_node, key, mini, None, *deps,
                     resources={'GPU': 1})
             else:
-                tasks[key] = client.submit(_run_node, key, graph, None, *deps)
+                tasks[key] = client.submit(_run_node, key, mini, None, *deps)
 
         wait(list(tasks.values()))
         results = client.gather(list(tasks.values()))

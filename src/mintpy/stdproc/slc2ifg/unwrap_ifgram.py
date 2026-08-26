@@ -146,6 +146,11 @@ def _open_wbd(wbd_path):
     return None
 
 
+#: in-process cache of warped water masks, keyed by
+#: ``(wbd_path, invert, target-grid signature)``.
+_WBD_CACHE: dict = {}
+
+
 def wbd_to_mask_array(wbd_path, ifg_path, invert=True):
     """Load a .wbd water mask warped onto the interferogram's grid.
 
@@ -175,6 +180,14 @@ def wbd_to_mask_array(wbd_path, ifg_path, invert=True):
     proj = ifg_ds.GetProjection()
     ifg_ds = None
 
+    # Cache by target GRID (all date pairs in a run share the same grid), so
+    # the expensive warp runs once per run instead of once per pair.
+    grid_sig = (rows, cols, tuple(gt), proj)
+    key = (str(wbd_path), bool(invert), grid_sig)
+    cached = _WBD_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     src = _open_wbd(wbd_path)
     if src is None:
         return None
@@ -198,7 +211,11 @@ def wbd_to_mask_array(wbd_path, ifg_path, invert=True):
     if warped is None:
         return None
     water = (warped > 0).astype(np.uint8)
-    return (1 - water).astype(np.uint8) if invert else water
+    result = (1 - water).astype(np.uint8) if invert else water
+    if len(_WBD_CACHE) >= 8:
+        _WBD_CACHE.clear()   # bounded: a single run needs only one entry
+    _WBD_CACHE[key] = result
+    return result
 
 # ------------------------------------------------------------------------
 # Active SNAPHU subprocess registry

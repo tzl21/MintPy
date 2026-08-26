@@ -281,8 +281,6 @@ def test_unwrap_backend_scoped_keys():
 
 def test_unwrap_legacy_keys_fallback():
     """Legacy flat keys (slc2ifg.unwrap.cost_mode, ...) still work with a warning."""
-    import logging
-
     eng = _mini_engine(extra='slc2ifg.unwrap.cost_mode = defo\n'
                              'slc2ifg.unwrap.nproc = 3\n'
                              'slc2ifg.unwrap.ntiles_row = 2\n')
@@ -451,8 +449,10 @@ def test_execute_cleanup_deletes_directories():
         assert not d.exists() and not f.exists()
 
 
-def test_output_ready_rejects_empty_files():
-    """skip_if_exists must not treat zero-byte (interrupted-run) outputs as valid."""
+def test_output_ready_rejects_empty_and_corrupt_files():
+    """skip_if_exists must not treat zero-byte or truncated-but-non-empty
+    (interrupted-run) outputs as valid: raster outputs must also be GDAL-
+    openable with non-trivial dimensions."""
     import tempfile
 
     from mintpy.stdproc.slc2ifg.engine.tool import Tool, ToolContext
@@ -464,8 +464,10 @@ def test_output_ready_rejects_empty_files():
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        good = tmp / 'good.tif'
-        good.write_bytes(b'x')          # non-empty
+        good = tmp / 'good.txt'
+        good.write_bytes(b'x')          # non-empty, non-raster
+        corrupt = tmp / 'bad.tif'
+        corrupt.write_bytes(b'x')       # non-empty but NOT a valid raster
         empty = tmp / 'empty.tif'
         empty.write_bytes(b'')          # zero-byte — interrupted write
         missing = tmp / 'missing.tif'
@@ -474,6 +476,7 @@ def test_output_ready_rejects_empty_files():
 
         assert Tool.output_ready([good]) is True
         assert Tool.output_ready([good, d]) is True
+        assert Tool.output_ready([corrupt]) is False,             'non-empty but unreadable raster must NOT be ready'
         assert Tool.output_ready([good, empty]) is False
         assert Tool.output_ready([good, missing]) is False
         assert Tool.output_ready([empty]) is False
@@ -485,6 +488,9 @@ def test_output_ready_rejects_empty_files():
         ctx2 = ToolContext(tool_name='t', inputs={}, outputs={'f': empty},
                            params={}, work_dir=tmp)
         assert _DummyTool().skip_if_exists(ctx2) is None
+        ctx3 = ToolContext(tool_name='t', inputs={}, outputs={'f': corrupt},
+                           params={}, work_dir=tmp)
+        assert _DummyTool().skip_if_exists(ctx3) is None
 
 
 # ------------------------------------------------------------------------

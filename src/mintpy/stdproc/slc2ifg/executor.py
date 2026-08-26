@@ -370,11 +370,14 @@ class BasicExecutor(Slc2ifgExecutor):
                 self._stitch_one(srcs, out, processor)
 
         # ---------- phase 3: uniform global chain per pair ----------------
-        first_pair_file = next(iter(pair_files.values()), None)
-        if first_pair_file is None:
-            logger.warning("no pair list produced — nothing to process")
-            return
-        pairs = _read_pairs(first_pair_file)
+        # Phase-3 pairs = the UNION of all per-burst pair lists (per-burst
+        # date sets can differ; using only the first burst would silently
+        # skip pairs that exist only in other bursts).
+        all_pairs: set = set()
+        for pf in pair_files.values():
+            if pf is not None:
+                all_pairs.update(_read_pairs(pf))
+        pairs = sorted(all_pairs)
         if not pairs:
             logger.warning("empty pair list — nothing to process")
             return
@@ -383,11 +386,15 @@ class BasicExecutor(Slc2ifgExecutor):
         # phases 1-2; complex_coh is not supported in the basic executor)
         chain = [s for s in ('multilook', 'filter', 'phsig_coh', 'unwrap')
                  if s in tools]
-        # map stage -> (input variant, input dir) threading
+        # phase-3 INPUTS come from phase3_base (the stitched tree in
+        # multi-burst mode); OUTPUTS go to the unified ifgram tree — the
+        # same layout as the engine (ml/filter/phsig/unwrap all live under
+        # <ifgram_out_dir>/{date_pair}/).
         cur_variant = 'fullres'
-        cur_base = phase3_base
+        cur_in_base = phase3_base
+        out_base = ifg_out
         for stage in chain:
-            tasks = [(cur_base, cur_variant, d1, d2, processor)
+            tasks = [(cur_in_base, out_base, cur_variant, d1, d2, processor)
                      for d1, d2 in pairs]
             handler = getattr(self, f'_stage_{stage}')
             results = self._map_pairs(tasks, handler, n_workers,
@@ -395,6 +402,8 @@ class BasicExecutor(Slc2ifgExecutor):
             for (d1, d2), ok, msg in results:
                 if not ok:
                     logger.error("%s %s_%s: %s", stage, d1, d2, msg)
+            # the next stage consumes this stage's outputs (unified tree)
+            cur_in_base = out_base
             if stage == 'multilook':
                 cur_variant = 'mli'
             elif stage == 'filter':
@@ -478,10 +487,10 @@ class BasicExecutor(Slc2ifgExecutor):
     def _stage_multilook(self, task):
         from mintpy.stdproc.multilook import multilook_tif
         from mintpy.stdproc.slc2ifg.utils import naming
-        base, variant, d1, d2, processor = task
+        base, out_base, variant, d1, d2, processor = task
         try:
             in_path = naming.ifg_path(base, d1, d2, variant, processor)
-            out_path = naming.ifg_path(base, d1, d2,
+            out_path = naming.ifg_path(out_base, d1, d2,
                                        naming.next_variant(variant, 'multilook'),
                                        processor)
             multilook_tif(str(in_path), str(out_path),
@@ -496,10 +505,10 @@ class BasicExecutor(Slc2ifgExecutor):
     def _stage_filter(self, task):
         from mintpy.stdproc.slc2ifg.filter import process_single_goldstein
         from mintpy.stdproc.slc2ifg.utils import naming
-        base, variant, d1, d2, processor = task
+        base, out_base, variant, d1, d2, processor = task
         try:
             in_path = naming.ifg_path(base, d1, d2, variant, processor)
-            out_path = naming.ifg_path(base, d1, d2,
+            out_path = naming.ifg_path(out_base, d1, d2,
                                        naming.next_variant(variant, 'filter'),
                                        processor)
             process_single_goldstein(
@@ -517,10 +526,10 @@ class BasicExecutor(Slc2ifgExecutor):
             read_complex_image,
         )
         from mintpy.stdproc.slc2ifg.utils import naming
-        base, variant, d1, d2, processor = task
+        base, out_base, variant, d1, d2, processor = task
         try:
             in_path = naming.ifg_path(base, d1, d2, variant, processor)
-            out_path = naming.coh_path(base, d1, d2, variant, 'phsig',
+            out_path = naming.coh_path(out_base, d1, d2, variant, 'phsig',
                                        processor)
             if out_path.exists():
                 return (d1, d2), True, 'exists'
@@ -544,14 +553,54 @@ class BasicExecutor(Slc2ifgExecutor):
     def _stage_unwrap(self, task):
         from mintpy.stdproc.slc2ifg.unwrap_ifgram import _unwrap_single
         from mintpy.stdproc.slc2ifg.utils import naming
-        base, variant, d1, d2, processor = task
+        base, out_base, variant, d1, d2, processor = task
         try:
             in_path = naming.ifg_path(base, d1, d2, variant, processor)
-            unw_root = base
+            unw_root = out_base
             unw_root.mkdir(parents=True, exist_ok=True)
-            coh_path = naming.coh_path(base, d1, d2, variant, 'phsig',
+
+            # ---- resolve the coherence input from slc2ifg.unwrap.coh_type
+            # (auto|complex|phsig|none), mirroring the engine ----
+            coh_cfg = str(self._opt('slc2ifg.unwrap.coh_type', 'auto')
+                          or 'auto').lower()
+            tools = self._tools_enabled()
+            phsig_path = naming.coh_path(out_base, d1, d2, variant, 'phsig',
+                                         processor)
+            cpx_path = naming.coh_path(out_base, d1, d2, 'fullres', 'cpx',
                                        processor)
-            cor = coh_path if coh_path.exists() else None
+            if coh_cfg in ('phsig', 'complex', 'none'):
+                coh_type = coh_cfg
+            elif coh_cfg == 'auto':
+                if 'phsig_coh' in tools:
+                    coh_type = 'phsig'
+                elif 'complex_coh' in tools and variant == 'fullres':
+                    coh_type = 'complex'
+                elif cpx_path.exists() and variant == 'fullres':
+                    coh_type = 'complex'     # reuse an existing cpx raster
+                elif phsig_path.exists():
+                    coh_type = 'phsig'       # reuse an existing phsig raster
+                else:
+                    coh_type = 'none'        # SNAPHU weight 1 (uniform)
+            else:
+                raise ValueError(
+                    f"slc2ifg.unwrap.coh_type '{coh_cfg}' invalid, expected "
+                    f"auto|complex|phsig|none (dp={d1}_{d2})")
+
+            cor = None
+            if coh_type == 'phsig':
+                if not phsig_path.exists():
+                    raise ValueError(
+                        f"unwrap: coh_type='phsig' but no phsig raster at "
+                        f"{phsig_path} (run the phsig_coh stage first)")
+                cor = phsig_path
+            elif coh_type == 'complex':
+                if not cpx_path.exists():
+                    raise ValueError(
+                        f"unwrap: coh_type='complex' but no complex coherence "
+                        f"raster at {cpx_path}")
+                cor = cpx_path
+            # 'none' -> cor stays None (uniform weights)
+
             mask = self._opt('slc2ifg.unwrap.snaphu.mask_file')
             if not mask:
                 mask = self._opt('mintpy.load.waterMaskFile')

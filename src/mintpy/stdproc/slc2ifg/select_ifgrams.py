@@ -552,6 +552,37 @@ def aggregate_coherence(
         f"unknown coherence stat '{stat}', expected mean|median|usable_frac|fisher")
 
 
+def _read_sampled_raster(band, grid: int = 12, block: int = 16) -> np.ndarray:
+    """Grid-sample a coherence raster band (no whole-image read).
+
+    Reads ``grid x grid`` uniformly-spaced ``block x block`` windows and
+    returns them as one flat float array — the same sampling idea as the
+    quick-SLC coherence path, applied to existing coherence rasters (a full
+    20592x4656 raster is ~400 MB per pair; the sample is ~0.04% of it).
+    """
+    rows = getattr(band, 'YSize', None)
+    cols = getattr(band, 'XSize', None)
+    if rows is None or cols is None:
+        # Non-GDAL band (unit-test fakes, exotic drivers): fall back to a
+        # full read so callers never break on the sampling path.
+        arr = band.ReadAsArray()
+        return np.asarray(arr, dtype=np.float32).ravel()
+    grid = max(1, int(grid))
+    block = max(1, min(int(block), rows, cols))
+    samples = []
+    for gi in range(grid):
+        y0 = int(round((rows - block) * gi / max(grid - 1, 1)))
+        for gj in range(grid):
+            x0 = int(round((cols - block) * gj / max(grid - 1, 1)))
+            win = band.ReadAsArray(x0, y0, block, block)
+            if win is None:
+                continue
+            samples.append(np.asarray(win, dtype=np.float32))
+    if not samples:
+        return np.array([], dtype=np.float32)
+    return np.concatenate([s.ravel() for s in samples])
+
+
 def weights_from_coherence_rasters(
     pairs: Iterable[Tuple[str, str]],
     coh_dir: str,
@@ -560,6 +591,8 @@ def weights_from_coherence_rasters(
     processor: str = 'isce3',
     stat: str = 'mean',
     usable_threshold: float = 0.3,
+    grid: int = 12,
+    block: int = 16,
 ) -> Dict[Tuple[str, str], Optional[float]]:
     """Pair quality from existing coherence rasters.
 
@@ -582,7 +615,11 @@ def weights_from_coherence_rasters(
             continue
         try:
             ds = gdal.Open(str(p))
-            arr = ds.GetRasterBand(1).ReadAsArray()
+            band = ds.GetRasterBand(1)
+            if grid and grid > 0:
+                arr = _read_sampled_raster(band, grid=grid, block=block)
+            else:
+                arr = band.ReadAsArray()
             ds = None
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("failed to read coherence raster %s: %s", p, exc)
@@ -1172,6 +1209,8 @@ def select_pairs(
                 processor=processor,
                 stat=str(p.get('coh_stat') or 'mean'),
                 usable_threshold=float(p.get('coh_usable_threshold') or 0.3),
+                grid=int(p.get('quick_grid') or 12),
+                block=int(p.get('quick_block') or 16),
             )
         elif slc_dir:
             measured_w = quick_coherence_weights(
