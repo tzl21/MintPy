@@ -224,8 +224,13 @@ def estimate_phsig_correlation(
 
             phases = np.arctan2(deramped.imag, deramped.real)
             wt = ps_weights[None, None, :, :]
-            mean_ph = np.sum(wt * phases, axis=(2, 3))
-            mean_ph2 = np.sum(wt * phases * phases, axis=(2, 3))
+            # accumulate the variance sums in float64, matching the GPU
+            # kernel (float32 sums differed from the GPU path in low-order
+            # bits across the whole image)
+            phases64 = phases.astype(np.float64)
+            wt64 = wt.astype(np.float64)
+            mean_ph = np.sum(wt64 * phases64, axis=(2, 3))
+            mean_ph2 = np.sum(wt64 * phases64 * phases64, axis=(2, 3))
             var = mean_ph2 - mean_ph * mean_ph
 
             with np.errstate(divide='ignore', invalid='ignore'):
@@ -337,7 +342,12 @@ def _output_path(input_file, output_dir, processor):
     else:
         base = input_path.stem
     ext = coh_ext(processor, 'phsig')
-    return output_dir / f"{base}{ext}"
+    # Include the parent directory name: two same-stemmed inputs from
+    # different directories (e.g. per-burst flat layouts) would otherwise
+    # map to the same output path and race on it.
+    parent = input_path.parent.name
+    prefix = f"{parent}_" if parent else ""
+    return output_dir / f"{prefix}{base}{ext}"
 
 
 # ---------------------------------------------------------------------------

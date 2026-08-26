@@ -267,14 +267,19 @@ class Tool(ABC):
 
         Files must be non-empty — a zero-byte/partial product left by an
         interrupted run is NOT treated as a valid output (the tool re-runs).
-        Directories only need to exist.
+        Raster-like files (GeoTIFF / ENVI / VRT) must additionally be
+        openable by GDAL with non-trivial dimensions, so a truncated but
+        non-empty raster is also rejected.  Directories only need to exist.
         """
         for p in paths:
             p = Path(p)
             if not p.exists():
                 return False
-            if p.is_file() and p.stat().st_size <= 0:
-                return False
+            if p.is_file():
+                if p.stat().st_size <= 0:
+                    return False
+                if _looks_like_raster(p) and not _raster_openable(p):
+                    return False
         return True
 
     def skip_if_exists(self, ctx: ToolContext) -> Optional[Dict[str, Path]]:
@@ -285,6 +290,34 @@ class Tool(ABC):
             ctx.skipped = True
             return dict(ctx.outputs)
         return None
+
+
+_RASTER_EXTS = ('.tif', '.tiff', '.vrt', '.unw', '.int', '.coh',
+                 '.slc', '.full', '.rdr', '.h5', '.hdf5', '.conncomp')
+
+
+def _looks_like_raster(p: Path) -> bool:
+    return p.suffix.lower() in _RASTER_EXTS or any(
+        p.name.endswith(s) for s in ('.unw.conncomp', '.unw.conncomp.tif',
+                                     '_phsig.coh', '_phsig.coh.tif',
+                                     '_cpx.coh', '_cpx.coh.tif'))
+
+
+def _raster_openable(p: Path) -> bool:
+    """Cheap metadata-only GDAL probe: openable with non-trivial dims."""
+    try:
+        from osgeo import gdal  # lazy — engine core stays osgeo-free
+    except ImportError:
+        return True   # no GDAL available: fall back to existence+size
+    try:
+        ds = gdal.Open(str(p))
+        if ds is None:
+            return False
+        ok = ds.RasterXSize > 0 and ds.RasterYSize > 0 and ds.RasterCount > 0
+        ds = None
+        return ok
+    except Exception:
+        return False
 
 
 TOOL_REGISTRY: Dict[str, type] = {}
