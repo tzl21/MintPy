@@ -806,40 +806,69 @@ def _max_mean_augment(
     max_pairs: Optional[int],
     thresh: float,
 ) -> Tuple[Set[Tuple[str, str]], Dict[str, int]]:
-    """Greedy mean-maximising augmentation toward a min-degree network.
+    """Augment the tree to a min-degree, mean-maximising network.
 
-    Starting from the (already selected) max-weight spanning tree, edges are
-    considered in descending weight.  An unselected edge at or above ``thresh``
-    is added when it either
+    Two phases, both bounded by the hard ``max_pairs`` edge budget:
 
-    * is **required** to lift one of its endpoints to ``min_degree``, or
-    * is **not below the current running mean** (adding it can never lower
-      the average coherence),
+    1. **Phase B1 — satisfy ``min_degree`` first** (a hard guarantee): edges
+       are added in descending weight whenever an endpoint still has degree
+       ``< min_degree``, until every date reaches the target (or the budget /
+       the above-threshold candidates run out).  This guarantees the degree
+       lower bound is met before anything else.
+    2. **Phase B2 — maximise the mean with the remaining budget**: with any
+       budget left over, add edges at or above the running mean (they can
+       never lower the average), repeating to a fixed point.
 
-    and the running mean is refreshed after each full sweep, repeating to a
-    fixed point.  The final set therefore keeps *every* edge at or above the
-    converged mean (these only raise the average) plus the few below-mean
-    edges forced by the connectivity / ``min_degree`` lower bound — i.e. the
-    maximum-mean selection for this skeleton, not merely the maximum-sum one.
-    ``max_pairs`` caps the total edge count (hard budget).
+    Because degree-filling is done first, a tight ``max_pairs`` budget cannot
+    be exhausted by above-mean edges on already-dense dates before
+    low-coherence dates are lifted to ``min_degree``.
     """
     selected = set(selected)
     degree = dict(degree)
-    while True:
+
+    def budget_left() -> bool:
+        return max_pairs is None or len(selected) < max_pairs
+
+    # --- Phase B1: lift every date to min_degree (highest weight first) ---
+    # Two tiers to avoid over-filling already-satisfied dates: first add edges
+    # where BOTH endpoints are deficient (raises two dates at once, never
+    # overshoots a satisfied date), then edges where one endpoint is deficient.
+    for tier in (0, 1):
+        while budget_left():
+            added_any = False
+            for a, b in order:
+                if not budget_left():
+                    break
+                if (a, b) in selected:
+                    continue
+                if weights[(a, b)] < thresh:
+                    continue
+                da = degree[a] < min_degree
+                db = degree[b] < min_degree
+                if not (da or db):
+                    continue            # not needed for the degree constraint
+                if tier == 0 and not (da and db):
+                    continue            # tier 0: both endpoints deficient
+                selected.add((a, b))
+                degree[a] += 1
+                degree[b] += 1
+                added_any = True
+            if not added_any:
+                break
+
+    # --- Phase B2: fill the remaining budget with above-mean edges ---
+    while budget_left():
         mu = _mean_weight(selected, weights)
-        if max_pairs is not None and len(selected) >= max_pairs:
-            break
         added_any = False
         for a, b in order:
+            if not budget_left():
+                break
             if (a, b) in selected:
                 continue
-            if max_pairs is not None and len(selected) >= max_pairs:
-                break
             if weights[(a, b)] < thresh:
                 continue
-            need = degree[a] < min_degree or degree[b] < min_degree
-            if not need and weights[(a, b)] < mu:
-                continue
+            if weights[(a, b)] < mu:
+                continue            # below the running mean -> would lower the average
             selected.add((a, b))
             degree[a] += 1
             degree[b] += 1
