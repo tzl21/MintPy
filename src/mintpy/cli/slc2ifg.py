@@ -62,7 +62,7 @@ def parse_arguments(iargs=None):
     if inps.generate_template:
         import os
         tfile = os.path.join(os.path.dirname(mintpy.__file__),
-                             'stdproc/slc2ifg/template/slc2ifg.cfg')
+                             'stdproc/template/slc2ifg.cfg')
         with open(tfile) as f:
             print(f.read())
         raise SystemExit(0)

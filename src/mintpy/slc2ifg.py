@@ -10,7 +10,7 @@ SLC-to-interferogram pre-processing (slc2ifg) runner for MintPy.
 Generates unwrapped interferograms (+ coherence, connected components) from
 a directory of SLC images, as a pre-processing step before MintPy's
 ``load_data``. Two interchangeable execution backends (see
-``mintpy.stdproc.slc2ifg.executor``):
+``mintpy.stdproc.executor``):
 
 - **basic** (default, no extra install): sequential chain with MintPy's own
   joblib parallelism over date pairs (``mintpy.compute.numWorker``);
@@ -38,7 +38,7 @@ def read_slc2ifg_template(cfg_file):
     """Read the slc2ifg default template (merges with the user config file)."""
     import mintpy
     tfile = os.path.join(os.path.dirname(mintpy.__file__),
-                         'stdproc/slc2ifg/template/slc2ifg.cfg')
+                         'stdproc/template/slc2ifg.cfg')
     tdict = readfile.read_template(tfile) if os.path.isfile(tfile) else {}
     cdict = readfile.read_template(cfg_file) if cfg_file else {}
     tdict.update(cdict)
@@ -52,7 +52,7 @@ def run_slc2ifg(cfg_file=None, template=None):
                 template  - dict, pre-parsed config (takes precedence)
     Returns:    None
     """
-    from mintpy.stdproc.slc2ifg.executor import get_executor
+    from mintpy.stdproc.executor import get_executor
 
     if isinstance(template, str):
         # --template as a raw config string: parse it into a dict

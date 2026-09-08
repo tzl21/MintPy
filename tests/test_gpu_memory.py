@@ -45,7 +45,7 @@ def _phsig_reference_full_ramp(ifg_arr, ps_win=5, grad_win=5, nlks=1.0):
     from numpy.lib.stride_tricks import sliding_window_view
     from scipy.ndimage import correlate
 
-    from mintpy.stdproc.slc2ifg.generate_coh_phsig import _gaussian_kernel
+    from mintpy.stdproc.generate_coh_phsig import _gaussian_kernel
 
     rows, cols = ifg_arr.shape
     if ps_win % 2 == 0:
@@ -130,7 +130,7 @@ def test_phsig_batched_ramp_bit_identical():
     import numpy as np
 
     _install_osgeo_stub()
-    from mintpy.stdproc.slc2ifg.generate_coh_phsig import estimate_phsig_correlation
+    from mintpy.stdproc.generate_coh_phsig import estimate_phsig_correlation
 
     rng = np.random.default_rng(7)
     for shape in ((37, 53), (100, 200), (33, 300)):
@@ -149,7 +149,7 @@ def test_phsig_batch_size_invariant():
     import numpy as np
 
     _install_osgeo_stub()
-    import mintpy.stdproc.slc2ifg.generate_coh_phsig as phsig
+    import mintpy.stdproc.generate_coh_phsig as phsig
 
     rng = np.random.default_rng(3)
     ifg = (rng.standard_normal((40, 60)) +
@@ -171,15 +171,18 @@ def test_phsig_batch_size_invariant():
 # ------------------------------------------------------------------------
 # P0: Goldstein patch batching + fallback counter
 # ------------------------------------------------------------------------
-def test_goldstein_patch_batch_default():
+def test_goldstein_patch_batch_default(monkeypatch):
     """Without CuPy the patch batch falls back to a fixed 4096."""
-    from mintpy.stdproc.slc2ifg.engine.gpu_kernels import _goldstein_patch_batch
-    assert _goldstein_patch_batch(32) == 4096
+    from mintpy.stdproc.engine import gpu_kernels
+    # deterministic regardless of the host GPU: drop cupy so the function
+    # takes its no-VRAM fallback branch
+    monkeypatch.setattr(gpu_kernels, "cp", None)
+    assert gpu_kernels._goldstein_patch_batch(32) == 4096
 
 
 def test_goldstein_patch_batch_uses_free_vram(monkeypatch):
     """With CuPy the batch is sized from the free VRAM (capped at 16384)."""
-    from mintpy.stdproc.slc2ifg.engine import gpu_kernels
+    from mintpy.stdproc.engine import gpu_kernels
 
     class _FakeMemInfo:
         @staticmethod
@@ -204,7 +207,7 @@ def test_goldstein_patch_batch_uses_free_vram(monkeypatch):
 
 def test_gpu_fallback_counter_increments():
     """_note_fallback counts fallbacks and is safe without CuPy installed."""
-    from mintpy.stdproc.slc2ifg.engine.gpu_kernels import _note_fallback, gpu_fallback_count
+    from mintpy.stdproc.engine.gpu_kernels import _note_fallback, gpu_fallback_count
     before = gpu_fallback_count()
     _note_fallback('phsig', RuntimeError('boom'))
     assert gpu_fallback_count() == before + 1
@@ -215,7 +218,7 @@ def test_gpu_fallback_counter_increments():
 # ------------------------------------------------------------------------
 def test_gpu_workers_accounted_from_estimates(monkeypatch):
     """gpu_workers = min(gpu_count, gpu_mem_limit_gb // per-task estimate)."""
-    from mintpy.stdproc.slc2ifg.engine import resources
+    from mintpy.stdproc.engine import resources
 
     monkeypatch.setattr(resources, 'gpu_available', lambda: True)
     monkeypatch.setattr(resources, 'max_gpu_mem_estimate_gb', lambda: 2.0)
@@ -238,14 +241,14 @@ def test_gpu_workers_budget_warns_when_overcommitted(monkeypatch, caplog):
     """A budget below one task's estimate warns and floors at 1 worker."""
     import logging
 
-    from mintpy.stdproc.slc2ifg.engine import resources
+    from mintpy.stdproc.engine import resources
 
     monkeypatch.setattr(resources, 'gpu_available', lambda: True)
     monkeypatch.setattr(resources, 'gpu_memory_gb', lambda: 24.0)
     monkeypatch.setattr(resources, 'gpu_count', lambda: 4)
     monkeypatch.setattr(resources, 'max_gpu_mem_estimate_gb', lambda: 2.0)
 
-    with caplog.at_level(logging.WARNING, logger='mintpy.stdproc.slc2ifg.engine.resources'):
+    with caplog.at_level(logging.WARNING, logger='mintpy.stdproc.engine.resources'):
         plan = resources.build_resource_plan(
             max_workers=8, gpu='auto', gpu_mem_limit_gb=1.0)
     assert plan.gpu_workers == 1
@@ -257,7 +260,7 @@ def test_gpu_workers_budget_warns_when_overcommitted(monkeypatch, caplog):
 # ------------------------------------------------------------------------
 def test_gpu_pool_round_robin_devices():
     """Slots are pinned to devices round-robin; acquire/release gate."""
-    from mintpy.stdproc.slc2ifg.engine.resources import GpuPool
+    from mintpy.stdproc.engine.resources import GpuPool
 
     pool = GpuPool(4, device_ids=[0, 1, 0, 1])
     assert [pool.acquire() for _ in range(4)] == [0, 1, 0, 1]
@@ -270,7 +273,7 @@ def test_gpu_pool_round_robin_devices():
 
 
 def test_gpu_pool_context_manager_returns_device():
-    from mintpy.stdproc.slc2ifg.engine.resources import GpuPool
+    from mintpy.stdproc.engine.resources import GpuPool
 
     with GpuPool(1, device_ids=[7]) as dev:
         assert dev == 7
@@ -281,7 +284,7 @@ def test_gpu_pool_blocks_when_exhausted():
     import threading
     import time
 
-    from mintpy.stdproc.slc2ifg.engine.resources import GpuPool
+    from mintpy.stdproc.engine.resources import GpuPool
 
     pool = GpuPool(1, device_ids=[0])
     assert pool.acquire() == 0
@@ -303,7 +306,7 @@ def test_gpu_pool_blocks_when_exhausted():
 # P2: auto tile_size when GPU is enabled
 # ------------------------------------------------------------------------
 def _gpu_engine_config(tmp_path):
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
+    from mintpy.stdproc.engine.config import load_engine_config
 
     inp = tmp_path / 'input'
     inp.mkdir()
@@ -321,8 +324,8 @@ def _gpu_engine_config(tmp_path):
 
 def test_auto_tile_size_when_gpu_enabled(tmp_path, monkeypatch):
     """GPU on + tile_size unset -> a VRAM-budgeted tile size is picked."""
-    from mintpy.stdproc.slc2ifg.engine import gpu_kernels, resources
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine import gpu_kernels, resources
+    from mintpy.stdproc.engine.engine import Engine
 
     monkeypatch.setattr(gpu_kernels, 'cupy_available', lambda: True)
     monkeypatch.setattr(resources, 'gpu_memory_gb', lambda: 8.0)
@@ -339,9 +342,9 @@ def test_auto_tile_size_when_gpu_enabled(tmp_path, monkeypatch):
 
 def test_no_auto_tile_when_gpu_disabled(tmp_path, monkeypatch):
     """GPU off -> engine.tile_size stays None (whole-image CPU as before)."""
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.engine import Engine
 
-    monkeypatch.setattr('mintpy.stdproc.slc2ifg.engine.gpu_kernels.cupy_available',
+    monkeypatch.setattr('mintpy.stdproc.engine.gpu_kernels.cupy_available',
                         lambda: True)
     config = _gpu_engine_config(tmp_path)
     config.gpu = 'false'
@@ -360,7 +363,7 @@ def test_gpu_kernels_parity_with_cpu():
     import numpy as np
 
     try:
-        from mintpy.stdproc.slc2ifg.engine import gpu_kernels as gk
+        from mintpy.stdproc.engine import gpu_kernels as gk
         if not gk.cupy_available():
             pytest.skip('no usable GPU device')
     except Exception:

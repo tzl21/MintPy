@@ -15,12 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from mintpy.stdproc.slc2ifg.ifgram_list import (
+from mintpy.stdproc.ifgram_list import (
     filter_date_list,
     generate_pairs,
     parse_exclude_dates,
 )
-from mintpy.stdproc.slc2ifg.select_ifgrams import check_connected
+from mintpy.stdproc.select_ifgrams import check_connected
 
 DATES = ['20230105', '20230117', '20230129', '20230210', '20230222',
          '20230306', '20230318', '20230330', '20230411', '20230423',
@@ -114,7 +114,7 @@ def test_generate_pairs_select_exclude():
 # CLI
 # ------------------------------------------------------------------------
 def test_ifgram_list_cli_exclude_date(tmp_path):
-    from mintpy.stdproc.slc2ifg import ifgram_list
+    from mintpy.stdproc import ifgram_list
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
     for d in DATES:
@@ -137,8 +137,8 @@ def test_ifgram_list_cli_exclude_date(tmp_path):
 # engine eager planning (cfg-driven)
 # ------------------------------------------------------------------------
 def test_engine_exclude_date_plan(tmp_path):
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     inp = tmp_path / 'input'
     inp.mkdir()
@@ -172,7 +172,7 @@ def test_engine_exclude_date_plan(tmp_path):
 # basic executor (cfg-driven)
 # ------------------------------------------------------------------------
 def test_basic_executor_exclude_date(tmp_path):
-    from mintpy.stdproc.slc2ifg.executor import BasicExecutor
+    from mintpy.stdproc.executor import BasicExecutor
 
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
@@ -200,8 +200,8 @@ def test_basic_executor_exclude_date(tmp_path):
 # date pattern, e.g. static_layers_*.h5 — see engine._add_crop_node)
 # ------------------------------------------------------------------------
 def test_engine_crop_keeps_non_date_files_and_excludes(tmp_path):
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     inp = tmp_path / 'input'
     inp.mkdir()

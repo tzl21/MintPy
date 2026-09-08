@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from mintpy.stdproc.slc2ifg.select_ifgrams import (
+from mintpy.stdproc.select_ifgrams import (
     _kruskal_max,
     aggregate_coherence,
     check_connected,
@@ -140,7 +140,7 @@ def test_parse_annual_windows():
 
 
 def test_auto_annual_windows_12day():
-    from mintpy.stdproc.slc2ifg.select_ifgrams import auto_annual_windows
+    from mintpy.stdproc.select_ifgrams import auto_annual_windows
     dates = _multi_year_dates()  # 61 dates, 12-day cycle
     w = auto_annual_windows(dates)
     assert w == ((180, 12), (360, 12))
@@ -150,13 +150,13 @@ def test_auto_annual_windows_12day():
 
 
 def test_auto_annual_windows_irregular_grid():
-    from mintpy.stdproc.slc2ifg.select_ifgrams import auto_annual_windows
+    from mintpy.stdproc.select_ifgrams import auto_annual_windows
     dates = _multi_year_dates(n=31, step_days=24)  # 24-day repeat
     w = auto_annual_windows(dates)
     centers = sorted({c for c, _ in w})
     assert centers == [192, 360]      # nearest multiples of 24 to 182.5/365.25
     # the windows must actually hit baselines on the 24-day grid
-    from mintpy.stdproc.slc2ifg.select_ifgrams import _resolve_annual_windows
+    from mintpy.stdproc.select_ifgrams import _resolve_annual_windows
     cand = generate_candidates(dates, num_connections=0, annual_windows='auto')
     dts = [_dt_days(a, b) for a, b in cand]
     assert any(abs(d - 182.5) <= 40 for d in dts)
@@ -164,7 +164,7 @@ def test_auto_annual_windows_irregular_grid():
 
 
 def test_resolve_annual_windows():
-    from mintpy.stdproc.slc2ifg.select_ifgrams import _resolve_annual_windows
+    from mintpy.stdproc.select_ifgrams import _resolve_annual_windows
     dates = _multi_year_dates()
     assert _resolve_annual_windows(None, dates) == ((180, 12), (360, 12))
     assert _resolve_annual_windows('auto', dates) == ((180, 12), (360, 12))
@@ -577,7 +577,7 @@ def test_read_perp_baselines(tmp_path):
 # Coherence kernels (pure numpy/scipy — no GDAL needed)
 # ------------------------------------------------------------------------
 def test_boxcar_coherence_identical_and_noise():
-    from mintpy.stdproc.slc2ifg.select_ifgrams import _boxcar_coherence
+    from mintpy.stdproc.select_ifgrams import _boxcar_coherence
     rng = np.random.default_rng(0)
     # identical SLCs -> coherence ~ 1 in the interior
     s = (rng.normal(size=(64, 64)) + 1j * rng.normal(size=(64, 64))).astype(np.complex64)
@@ -592,7 +592,7 @@ def test_boxcar_coherence_identical_and_noise():
 
 
 def test_debias_coherence():
-    from mintpy.stdproc.slc2ifg.select_ifgrams import _debias_coherence
+    from mintpy.stdproc.select_ifgrams import _debias_coherence
     looks = 100.0  # (10 x 10) effective looks
     thr = 1.0 / (2.0 * looks)
     coh = np.array([thr * 0.5, 0.2, 0.5, 0.8, 1.0])
@@ -683,7 +683,7 @@ def test_verify_selection_report():
 
 
 def test_generate_pairs_select_mode():
-    from mintpy.stdproc.slc2ifg.ifgram_list import generate_pairs
+    from mintpy.stdproc.ifgram_list import generate_pairs
     cand = generate_candidates(DATES, num_connections=3, annual_windows=())
     w = _random_weights(DATES, cand, seed=6)
     pairs = generate_pairs(
@@ -694,7 +694,7 @@ def test_generate_pairs_select_mode():
 
 
 def test_generate_pairs_select_uses_num_connections():
-    from mintpy.stdproc.slc2ifg.ifgram_list import generate_pairs
+    from mintpy.stdproc.ifgram_list import generate_pairs
     pairs = generate_pairs(
         DATES, mode='select', num_connections=1, oneyear_range=None,
         select_params={'weight_source': 'model', 'min_degree': 1})
@@ -707,7 +707,7 @@ def test_generate_pairs_select_uses_num_connections():
 # CLI integration
 # ------------------------------------------------------------------------
 def test_ifgram_list_cli_select_mode(tmp_path, capsys):
-    from mintpy.stdproc.slc2ifg import ifgram_list
+    from mintpy.stdproc import ifgram_list
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
     for d in DATES:
@@ -728,7 +728,7 @@ def test_ifgram_list_cli_select_mode(tmp_path, capsys):
 
 
 def test_ifgram_list_cli_select_report(tmp_path):
-    from mintpy.stdproc.slc2ifg import ifgram_list
+    from mintpy.stdproc import ifgram_list
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
     for d in DATES:
@@ -753,8 +753,8 @@ def test_ifgram_list_cli_select_report(tmp_path):
 def test_engine_select_mode_plan(tmp_path):
     """The engine's eager ifgram_list runs in select mode and produces a
     connected, full-rank pair list consumed by generate_ifgram nodes."""
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     inp = tmp_path / 'input'
     inp.mkdir()
@@ -886,14 +886,14 @@ def _uninstall_fake_osgeo():
     for key in ('osgeo', 'osgeo.gdal', 'osgeo.osr'):
         sys.modules.pop(key, None)
     # drop cached modules that imported the fake (re-imported on next use)
-    for key in ('mintpy.stdproc.slc2ifg.generate_coh_complex',
-                'mintpy.stdproc.slc2ifg.utils.slc2ifg_utils'):
+    for key in ('mintpy.stdproc.generate_coh_complex',
+                'mintpy.stdproc.utils.slc2ifg_utils'):
         sys.modules.pop(key, None)
 
 
 def test_quick_coherence_weights(tmp_path):
     """On-the-fly coherence on downsampled SLCs (fake GDAL)."""
-    from mintpy.stdproc.slc2ifg.select_ifgrams import quick_coherence_weights
+    from mintpy.stdproc.select_ifgrams import quick_coherence_weights
 
     rng = np.random.default_rng(42)
     slc_dir = tmp_path / 'slc'
@@ -928,7 +928,7 @@ def test_quick_coherence_weights(tmp_path):
 
 def test_quick_coherence_two_band_isce2(tmp_path):
     """Two-band (real/imag) isce2 SLCs through the quick-coherence path."""
-    from mintpy.stdproc.slc2ifg.select_ifgrams import quick_coherence_weights
+    from mintpy.stdproc.select_ifgrams import quick_coherence_weights
 
     rng = np.random.default_rng(7)
     slc_dir = tmp_path / 'slc'
@@ -951,7 +951,7 @@ def test_quick_coherence_two_band_isce2(tmp_path):
 
 def test_weights_from_coherence_rasters(tmp_path):
     """Weights from existing coherence rasters (fake GDAL)."""
-    from mintpy.stdproc.slc2ifg.select_ifgrams import weights_from_coherence_rasters
+    from mintpy.stdproc.select_ifgrams import weights_from_coherence_rasters
 
     coh_dir = tmp_path / 'coh'
     pairs = [('20230105', '20230117'), ('20230117', '20230129'),
@@ -959,7 +959,7 @@ def test_weights_from_coherence_rasters(tmp_path):
     sources = {}
     for a, b, val in [(pairs[0][0], pairs[0][1], 0.9),
                       (pairs[1][0], pairs[1][1], 0.4)]:
-        p = coh_dir / f'{a}_{b}' / 'filt_mli_phsig.coh.tif'
+        p = coh_dir / f'{a}_{b}' / 'filt_mli.phsig.coh.tif'
         p.parent.mkdir(parents=True, exist_ok=True)
         p.touch()
         sources[str(p)] = np.full((32, 32), val, dtype=np.float32)
@@ -979,7 +979,7 @@ def test_weights_from_coherence_rasters(tmp_path):
 def test_select_pairs_with_quick_coherence_end_to_end(tmp_path):
     """select_pairs with weight_source='coherence' (quick path) selects a
     connected, full-rank network on synthetic SLCs."""
-    from mintpy.stdproc.slc2ifg.select_ifgrams import select_pairs
+    from mintpy.stdproc.select_ifgrams import select_pairs
 
     rng = np.random.default_rng(3)
     slc_dir = tmp_path / 'slc'
@@ -1061,7 +1061,7 @@ def test_network_dot_output(tmp_path):
 
 
 def test_write_network_dot_direct(tmp_path):
-    from mintpy.stdproc.slc2ifg.select_ifgrams import write_network_dot
+    from mintpy.stdproc.select_ifgrams import write_network_dot
     pairs = [('20230105', '20230117'), ('20230117', '20230129')]
     w = {('20230105', '20230117'): 0.875, ('20230117', '20230129'): 0.766}
     p = tmp_path / 'n.dot'
@@ -1075,7 +1075,7 @@ def test_write_network_dot_direct(tmp_path):
 
 def test_quick_coherence_parallel_matches_serial(tmp_path):
     """Parallel (max_workers>1) quick coherence gives identical weights."""
-    from mintpy.stdproc.slc2ifg.select_ifgrams import quick_coherence_weights
+    from mintpy.stdproc.select_ifgrams import quick_coherence_weights
 
     rng = np.random.default_rng(42)
     slc_dir = tmp_path / 'slc'
@@ -1106,7 +1106,7 @@ def test_quick_coherence_parallel_matches_serial(tmp_path):
 
 def test_quick_coherence_opera_h5(tmp_path):
     """OPERA-style GSLC .h5 files (subdataset /data/VV via NETCDF driver)."""
-    from mintpy.stdproc.slc2ifg.select_ifgrams import quick_coherence_weights
+    from mintpy.stdproc.select_ifgrams import quick_coherence_weights
 
     rng = np.random.default_rng(9)
     slc_dir = tmp_path / 'slc'
