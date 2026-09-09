@@ -385,16 +385,14 @@ def test_gpu_kernels_parity_with_cpu():
     p_cpu = gk.estimate_phsig_block(ifg, 5, 5, 8.0, gpu=False)
     assert np.max(np.abs(p_gpu - p_cpu)) < 1e-5
 
-    # 3. goldstein filter (all-nodata corner must not inflate the norm)
+    # 3. goldstein filter (GPU/CPU parity; all-nodata patches are skipped)
     block = (rng.random((256, 256)) + 1j * rng.random((256, 256))).astype(np.complex64)
     block[:16, :16] = 0
     nd = np.abs(block) < 1e-6
     psize = 32
     wf = np.outer(np.hanning(psize), np.hanning(psize))
-    f_gpu, n_gpu = gk.goldstein_block(block, nd, 0.8, psize, wf, (0, 0), gpu=True)
-    f_cpu, n_cpu = gk.goldstein_block(block, nd, 0.8, psize, wf, (0, 0), gpu=False)
-    assert np.max(np.abs(n_gpu - n_cpu)) < 1e-5
+    f_gpu = gk.goldstein_block(block, nd, 0.8, psize, wf, (0, 0), gpu=True)
+    f_cpu = gk.goldstein_block(block, nd, 0.8, psize, wf, (0, 0), gpu=False)
     denom = np.abs(f_gpu) + np.abs(f_cpu)
     rel = np.abs(f_gpu - f_cpu) / np.maximum(denom, 1e-30)
     assert rel.max() < 1e-4, 'goldstein GPU/CPU relative deviation too large'
-    assert n_gpu[0, 0] == 0.0, 'all-nodata patch corner must not add norm'

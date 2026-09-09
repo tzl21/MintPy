@@ -298,10 +298,12 @@ def complex_coh_tiled(
     tile_workers: int = 1,
     gpu: bool = False,
     subdataset: str = '/data/VV',
+    window_type: str = 'triangular',
 ) -> str:
-    """Tiled boxcar complex coherence between two SLC files.
+    """Tiled windowed complex coherence between two SLC files.
 
-    ``subdataset`` selects the HDF5 dataset for ``.h5`` SLC inputs.
+    ``subdataset`` selects the HDF5 dataset for ``.h5`` SLC inputs;
+    ``window_type`` is 'triangular' (ISCE2 Bartlett, default) or 'uniform'.
     """
     from mintpy.stdproc.engine.gpu_kernels import complex_coh_block
     from mintpy.stdproc.utils.slc2ifg_utils import open_gdal
@@ -335,7 +337,8 @@ def complex_coh_tiled(
                 s1 = s1.astype(np.complex64)
             if s2.dtype not in (np.complex64, np.complex128):
                 s2 = s2.astype(np.complex64)
-        return complex_coh_block(s1, s2, window, gpu=gpu)
+        return complex_coh_block(s1, s2, window, gpu=gpu,
+                                 window_type=window_type)
 
     def run(target: str) -> None:
         out_ds = _open_like(slc1_file, target, rows, cols,
@@ -372,23 +375,26 @@ def goldstein_tiled(
     processor: str,
     tile_workers: int = 1,
     gpu: bool = False,
+    rescale_magnitude: bool = True,
 ) -> str:
-    """Tiled Goldstein filter, bit-identical to the full-image run.
+    """Tiled Goldstein filter, bit-identical to the full-image ISCE2 run.
 
-    The patch grid (starts at multiples of ``psize//2`` in the *padded*
-    full-image coordinates) is preserved across tiles, so the triangle-window
-    accumulation matches the non-tiled ``goldstein()`` exactly.
+    ISCE2 semantics (``psfilt.c`` + ``rescale_magnitude.c``): FFT patches of
+    ``psize`` pixels stepped by ``psize // 2`` anchored at the image origin,
+    the ``psfilt.c`` Bartlett window, patch contributions summed without
+    per-pixel re-normalization, and (by default) the ISCE2 magnitude
+    rescaling that restores the input amplitude.
+
+    Each tile is read with a ``psize`` halo, so every patch overlapping the
+    tile is fully contained in the block and the accumulation matches the
+    non-tiled ``goldstein()`` exactly.
     """
+    halo = psize
 
-    pad = psize // 2
-
-    # triangle window (same as filter_utils.goldstein)
-    half = pad
-    wx = (1.0 - np.abs(np.arange(half) - (psize / 2.0 - 1.0)) / (psize / 2.0 - 1.0))
-    wy = wx
-    q = np.outer(wy, wx)
-    wf = np.block([[q, np.flip(q, 1)],
-                   [np.flip(q, 0), np.flip(np.flip(q, 0), 1)]])
+    # ISCE2 Bartlett window (psfilt.c)
+    idx = np.arange(psize, dtype=np.float64)
+    w1d = 1.0 - np.abs(2.0 * (idx - psize // 2) / (psize + 1.0))
+    wf = (np.outer(w1d, w1d) / float(psize * psize)).astype(np.float32)
 
     src = gdal.Open(str(input_file), gdal.GA_ReadOnly)
     rows, cols = src.RasterYSize, src.RasterXSize
@@ -398,20 +404,24 @@ def goldstein_tiled(
     src = None
     is_complex = np.issubdtype(in_dtype, np.complexfloating)
 
-    p_rows, p_cols = rows + 2 * pad, cols + 2 * pad
-    jobs = list(tile_jobs(p_rows, p_cols, tile_size, psize))
+    # tiles in original coordinates; the block extends by psize on the far
+    # side as well (zero-extended past the image edge, like psfilt.c)
+    t = max(1, int(tile_size))
+    jobs = []
+    for r0 in range(0, rows, t):
+        r1 = min(r0 + t, rows)
+        pr0, pr1 = max(0, r0 - halo), min(rows + psize, r1 + halo)
+        for c0 in range(0, cols, t):
+            c1 = min(c0 + t, cols)
+            pc0, pc1 = max(0, c0 - halo), min(cols + psize, c1 + halo)
+            jobs.append((r0, r1, pr0, pr1, c0, c1, pc0, pc1))
 
-    def read_padded_block(pr0, pr1, pc0, pc1) -> Tuple[np.ndarray, np.ndarray]:
-        """Padded (complex, nodata) block in padded full-image coords.
-
-        Padded coord ``p`` maps to file coord ``p - pad``; file reads are
-        clamped to the raster extent (padded margins read as zero/nodata).
-        """
+    def read_block(pr0, pr1, pc0, pc1) -> Tuple[np.ndarray, np.ndarray]:
+        """Zero-extended complex block in original (unpadded) coordinates."""
         block = np.zeros((pr1 - pr0, pc1 - pc0), dtype=np.complex64)
         nodata = np.ones((pr1 - pr0, pc1 - pc0), dtype=bool)
-        # file region intersecting the block (clamped)
-        f_r0, f_r1 = max(0, pr0 - pad), min(rows, pr1 - pad)
-        f_c0, f_c1 = max(0, pc0 - pad), min(cols, pc1 - pad)
+        f_r0, f_r1 = max(0, pr0), min(rows, pr1)
+        f_c0, f_c1 = max(0, pc0), min(cols, pc1)
         if f_r1 > f_r0 and f_c1 > f_c0:
             with _IO_LOCK:
                 ds = gdal.Open(str(input_file), gdal.GA_ReadOnly)
@@ -423,58 +433,36 @@ def goldstein_tiled(
             if arr is not None:
                 if not np.issubdtype(arr.dtype, np.complexfloating):
                     # real-valued phase input: unit-complex conversion, same
-                    # as the reference filter_utils.goldstein (a plain cast
-                    # would filter (phase + 0j) with wrong semantics)
+                    # as the reference filter_utils.goldstein
                     arr = np.exp(1j * arr).astype(np.complex64)
                 arr = np.nan_to_num(arr).astype(np.complex64)
-                # file coords -> padded coords -> block-local coords
-                lr0, lr1 = f_r0 + pad - pr0, f_r1 + pad - pr0
-                lc0, lc1 = f_c0 + pad - pc0, f_c1 + pad - pc0
+                lr0, lr1 = f_r0 - pr0, f_r1 - pr0
+                lc0, lc1 = f_c0 - pc0, f_c1 - pc0
                 block[lr0:lr1, lc0:lc1] = arr
                 nodata[lr0:lr1, lc0:lc1] = np.abs(arr) < 1e-6
         return block, nodata
 
-    def compute(job) -> Optional[Tuple[np.ndarray, int, int, int, int, int, int]]:
-        """Read padded block + kernel; returns (out_val, slice coords, out
-        origin) or None when the tile lies fully outside the original image."""
+    def compute(job) -> Optional[Tuple[np.ndarray, int, int]]:
         r0, r1, pr0, pr1, c0, c1, pc0, pc1 = job
-        block, nodata = read_padded_block(pr0, pr1, pc0, pc1)
+        block, nodata = read_block(pr0, pr1, pc0, pc1)
 
-        # shared anchored kernel (CPU or GPU batched FFT); origin = block's
-        # global padded coordinates so the patch grid matches the full image
         from mintpy.stdproc.engine.gpu_kernels import goldstein_block
-        filtered, norm = goldstein_block(
+        filtered = goldstein_block(
             block, nodata, alpha, psize, wf, (pr0, pc0), gpu=gpu)
 
-        # tile's own region (block-local coords)
-        t0 = r0 - pr0
-        t1 = r1 - pr0
-        u0 = c0 - pc0
-        u1 = c1 - pc0
-        seg = filtered[t0:t1, u0:u1]
-        nseg = norm[t0:t1, u0:u1]
-        valid = nseg > 0
-        seg[valid] /= nseg[valid]
-        seg[~valid] = 0 + 0j
+        # tile region in block-local coordinates
+        t0, t1 = r0 - pr0, r1 - pr0
+        u0, u1 = c0 - pc0, c1 - pc0
+        seg = filtered[t0:t1, u0:u1].copy()
+        nd = nodata[t0:t1, u0:u1]
+        if rescale_magnitude:
+            # ISCE2 rescale_magnitude.c: filtered phase + input magnitude
+            seg = np.abs(block[t0:t1, u0:u1]) * np.exp(1j * np.angle(seg))
+        seg[nd] = 0 + 0j
 
-        # original-coordinate nodata masking (same as goldstein())
-        tile_nd = nodata[t0:t1, u0:u1]
-        seg[tile_nd] = 0 + 0j
-
-        out_val = seg.astype(np.complex64) if is_complex else np.angle(seg).astype(np.float32)
-
-        # write only the part of the tile inside the original image
-        o_r0, o_r1 = max(0, r0 - pad), min(rows, r1 - pad)
-        o_c0, o_c1 = max(0, c0 - pad), min(cols, c1 - pad)
-        if o_r1 <= o_r0 or o_c1 <= o_c0:
-            return None
-        # seg coords for original rows/cols: seg row s = padded row (r0 + s)
-        # -> original row (r0 + s - pad)
-        s_r0 = o_r0 + pad - r0
-        s_r1 = o_r1 + pad - r0
-        s_c0 = o_c0 + pad - c0
-        s_c1 = o_c1 + pad - c0
-        return out_val, s_r0, s_r1, s_c0, s_c1, o_c0, o_r0
+        out_val = (seg.astype(np.complex64) if is_complex
+                   else np.angle(seg).astype(np.float32))
+        return out_val, c0, r0
 
     def run(target: str) -> None:
         out_ds = _open_like(input_file, target, rows, cols,
@@ -485,16 +473,14 @@ def goldstein_tiled(
         def write(_i: int, job, payload) -> None:
             if payload is None:
                 return
-            out_val, s_r0, s_r1, s_c0, s_c1, o_c0, o_r0 = payload
+            out_val, oc0, or0 = payload
             with _IO_LOCK:
                 o = gdal.Open(str(target), gdal.GA_Update)
                 try:
-                    o.GetRasterBand(1).WriteArray(
-                        out_val[s_r0:s_r1, s_c0:s_c1], o_c0, o_r0)
+                    o.GetRasterBand(1).WriteArray(out_val, oc0, or0)
                 finally:
                     o = None
 
         _run_ordered(jobs, compute, write, tile_workers)
-        out_ds = None  # noqa: F841 -- release the GDAL write handle
 
     return _atomic_write(output_file, run)

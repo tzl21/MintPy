@@ -43,8 +43,40 @@ gdal.UseExceptions()
 
 DEFAULT_PARAMS = {
     'window_size': 5,
+    #: spatial weighting of the estimation window:
+    #:   'triangular' (default) - Bartlett weights, identical to the ISCE2
+    #:       `cchz_wave.cpp` estimator: w(i) = 1 - |2*(i - n//2)/(n+1)|
+    #:   'uniform'    - plain boxcar (equal weights)
+    'window_type': 'triangular',
     'use_amplitude': True,
 }
+
+#: supported coherence window weightings
+WINDOW_TYPES = ('triangular', 'uniform')
+
+
+def coherence_kernel(window_size: int, window_type: str = 'triangular'):
+    """Normalized 2-D spatial weighting kernel for coherence estimation.
+
+    ``triangular`` reproduces the ISCE2 ``mroipac/correlation`` Bartlett
+    weighting ``w(i) = 1 - |2*(i - n//2)/(n+1)|`` as a separable outer
+    product (the coherence is a ratio, so the normalization cancels; it is
+    applied here to keep the sums numerically well behaved).
+    """
+    if window_type not in WINDOW_TYPES:
+        raise ValueError(
+            f"Unknown window_type '{window_type}', expected one of {WINDOW_TYPES}")
+    n = int(window_size)
+    if n % 2 == 0:
+        n += 1
+    if window_type == 'uniform':
+        kernel = np.ones((n, n), dtype=np.float32)
+    else:
+        i = np.arange(n, dtype=np.float64)
+        w = 1.0 - np.abs(2.0 * (i - n // 2) / (n + 1.0))
+        kernel = np.outer(w, w)
+    return (kernel / kernel.sum()).astype(np.float32)
+
 
 
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> logging.Logger:
@@ -94,6 +126,7 @@ class CoherenceEstimator:
             self.params.update(params)
 
         self.win_size = self.params['window_size']
+        self.window_type = self.params.get('window_type', 'triangular')
 
         # Ensure odd window size
         if self.win_size % 2 == 0:
@@ -103,12 +136,12 @@ class CoherenceEstimator:
 
         self._precompute_kernel()
 
-        self.logger.info("Initialized: window_size=%dx%d", self.win_size, self.win_size)
+        self.logger.info("Initialized: window_size=%dx%d, window_type=%s",
+                         self.win_size, self.win_size, self.window_type)
 
     def _precompute_kernel(self) -> None:
-        """Precompute the spatial averaging kernel (normalized boxcar)."""
-        self.kernel = np.ones((self.win_size, self.win_size), dtype=np.float32)
-        self.kernel /= np.sum(self.kernel)
+        """Precompute the spatial weighting kernel (triangular or uniform)."""
+        self.kernel = coherence_kernel(self.win_size, self.window_type)
 
     def compute_coherence(self, slc1: np.ndarray, slc2: np.ndarray,
                           mask: Optional[np.ndarray] = None) -> np.ndarray:
@@ -391,6 +424,7 @@ def parse_arguments(args_list=None):
         epilog=f"""
 Default parameters:
   window_size:   {DEFAULT_PARAMS['window_size']}
+  window_type:   {DEFAULT_PARAMS['window_type']}
 
 Input: Pairs file (ifgram_list.txt) and SLC directory.
 Output: Single-band raster with coherence values in range [0,1] for each pair.
@@ -433,6 +467,14 @@ Output: Single-band raster with coherence values in range [0,1] for each pair.
         type=int,
         default=DEFAULT_PARAMS['window_size'],
         help=f'Sliding window size for coherence estimation (default: {DEFAULT_PARAMS["window_size"]})'
+    )
+    param_group.add_argument(
+        '--window-type',
+        choices=list(WINDOW_TYPES),
+        default=DEFAULT_PARAMS['window_type'],
+        help='Spatial weighting of the estimation window: '
+             f'"triangular" (ISCE2 Bartlett, default) or "uniform" (boxcar) '
+             f'(default: {DEFAULT_PARAMS["window_type"]})'
     )
 
     proc_group = parser.add_argument_group('Processing options')
@@ -552,10 +594,12 @@ def main(args=None):
 
     params = {
         'window_size': args.window_size,
+        'window_type': args.window_type,
         'use_amplitude': DEFAULT_PARAMS['use_amplitude'],
     }
 
-    logger.info("Parameters: window_size=%d", params['window_size'])
+    logger.info("Parameters: window_size=%d, window_type=%s",
+                params['window_size'], params['window_type'])
 
     successful = 0
     failed = 0

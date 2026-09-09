@@ -123,6 +123,13 @@ Examples:
         default=5,
         help='Sliding window size for coherence estimation (default: 5)'
     )
+    cc_group.add_argument(
+        '--cc-window-type',
+        choices=['triangular', 'uniform'],
+        default='triangular',
+        help='Spatial weighting of the coherence window: '
+             '"triangular" (ISCE2 Bartlett, default) or "uniform" (boxcar)'
+    )
 
     # Processing options
     proc_group = parser.add_argument_group('Processing options')
@@ -180,6 +187,7 @@ def build_complex_args(args):
         '--slc-pattern', args.slc_pattern,
         '--output', args.output_dir,
         '--window-size', str(args.cc_window_size),
+        '--window-type', str(args.cc_window_type),
         '--max-workers', str(args.max_workers),
     ]
     if args.verbose:

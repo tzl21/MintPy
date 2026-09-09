@@ -133,24 +133,31 @@ def _gaussian_kernel_cp(size: int):
 # Complex coherence
 # ------------------------------------------------------------------------
 def complex_coh_block(slc1: np.ndarray, slc2: np.ndarray, window: int,
-                      gpu: bool = False) -> np.ndarray:
-    """Boxcar complex coherence of two complex SLC blocks -> float32.
+                      gpu: bool = False,
+                      window_type: str = 'triangular') -> np.ndarray:
+    """Windowed complex coherence of two complex SLC blocks -> float32.
 
     Bit-identical semantics to ``CoherenceEstimator.compute_coherence``
     (borders of ``window//2`` are zeroed by the caller via ``zero_margin``).
+    ``window_type`` selects the spatial weighting: 'triangular' (ISCE2
+    Bartlett, default) or 'uniform' (boxcar).
     """
     if gpu and cupy_available():
         try:
-            return _complex_coh_gpu(slc1, slc2, window)
+            return _complex_coh_gpu(slc1, slc2, window, window_type)
         except Exception as e:
             _note_fallback('complex coherence', e)
-    return _complex_coh_cpu(slc1, slc2, window)
+    return _complex_coh_cpu(slc1, slc2, window, window_type)
 
 
-def _complex_coh_cpu(slc1: np.ndarray, slc2: np.ndarray, window: int):
+def _complex_coh_cpu(slc1: np.ndarray, slc2: np.ndarray, window: int,
+                     window_type: str = 'triangular'):
     from scipy.ndimage import correlate
+
+    from mintpy.stdproc.generate_coh_complex import coherence_kernel
+
     win = window if window % 2 else window + 1
-    kernel = np.ones((win, win), dtype=np.float32) / (win * win)
+    kernel = coherence_kernel(win, window_type)
     ifg = slc1 * np.conj(slc2)
     mag_sq1 = (np.abs(slc1) ** 2).astype(np.float32)
     mag_sq2 = (np.abs(slc2) ** 2).astype(np.float32)
@@ -163,9 +170,12 @@ def _complex_coh_cpu(slc1: np.ndarray, slc2: np.ndarray, window: int):
     return np.clip(coh, 0.0, 1.0)
 
 
-def _complex_coh_gpu(slc1: np.ndarray, slc2: np.ndarray, window: int):
+def _complex_coh_gpu(slc1: np.ndarray, slc2: np.ndarray, window: int,
+                     window_type: str = 'triangular'):
+    from mintpy.stdproc.generate_coh_complex import coherence_kernel
+
     win = window if window % 2 else window + 1
-    kernel = cp.ones((win, win), dtype=cp.float32) / (win * win)
+    kernel = cp.asarray(coherence_kernel(win, window_type))
     s1 = cp.asarray(slc1)
     s2 = cp.asarray(slc2)
     ifg = s1 * cp.conj(s2)
@@ -299,7 +309,7 @@ def _phsig_gpu(ifg_arr: np.ndarray, ps_win: int, grad_win: int,
 # ------------------------------------------------------------------------
 def goldstein_block(block: np.ndarray, nodata_mask: np.ndarray, alpha: float,
                     psize: int, wf: np.ndarray, origin: Tuple[int, int],
-                    gpu: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+                    gpu: bool = False) -> np.ndarray:
     """Goldstein-filter one padded block with full-image-anchored patches.
 
     Parameters
@@ -320,7 +330,9 @@ def goldstein_block(block: np.ndarray, nodata_mask: np.ndarray, alpha: float,
 
     Returns
     -------
-    (filtered, norm) numpy arrays of ``block.shape`` (padded coordinates).
+    filtered : numpy array of ``block.shape`` (ISCE2 semantics: the patch
+        contributions are summed with the ``psfilt.c`` window normalization,
+        i.e. no per-pixel re-normalization).
     """
     if gpu and cupy_available():
         try:
@@ -334,7 +346,6 @@ def _goldstein_cpu(block, nodata_mask, alpha, psize, wf, origin):
     b_rows, b_cols = block.shape
     step = psize // 2
     filtered = np.zeros_like(block)
-    norm = np.zeros((b_rows, b_cols), dtype=np.float32)
     r0, c0 = origin
     # global patch starts are multiples of step from the padded image origin
     i_first = max(0, ((r0 - psize + 1 + step - 1) // step) * step)
@@ -357,10 +368,8 @@ def _goldstein_cpu(block, nodata_mask, alpha, psize, wf, origin):
             S = np.fft.fft2(patch, s=(psize, psize))
             H = np.power(np.abs(S), alpha)
             pf = np.fft.ifft2(H * S, s=(psize, psize))
-            w = wf[:psize, :psize]
-            filtered[li:li + psize, lj:lj + psize] += pf * w
-            norm[li:li + psize, lj:lj + psize] += w
-    return filtered, norm
+            filtered[li:li + psize, lj:lj + psize] += pf * wf[:psize, :psize]
+    return filtered
 
 
 def _goldstein_gpu(block, nodata_mask, alpha, psize, wf, origin):
@@ -373,7 +382,7 @@ def _goldstein_gpu(block, nodata_mask, alpha, psize, wf, origin):
     i_starts = list(range(i_first, r0 + b_rows - psize + 1, step))
     j_starts = list(range(j_first, c0 + b_cols - psize + 1, step))
     if not i_starts or not j_starts:
-        return np.zeros_like(block), np.zeros((b_rows, b_cols), dtype=np.float32)
+        return np.zeros_like(block)
 
     blk = cp.asarray(block)
     nd = cp.asarray(nodata_mask)
@@ -383,8 +392,6 @@ def _goldstein_gpu(block, nodata_mask, alpha, psize, wf, origin):
     # host and updated once per patch batch.
     filt_re = np.zeros((b_rows, b_cols), dtype=np.float32)
     filt_im = np.zeros((b_rows, b_cols), dtype=np.float32)
-    norm = np.zeros((b_rows, b_cols), dtype=np.float32)
-    wf_np = wf[:psize, :psize]
 
     li = cp.asarray([i - r0 for i in i_starts])
     lj = cp.asarray([j - c0 for j in j_starts])
@@ -436,20 +443,8 @@ def _goldstein_gpu(block, nodata_mask, alpha, psize, wf, origin):
         out_c_np = cp.asnumpy(out_c.ravel())
         np.add.at(filt_re, (out_r_np, out_c_np), contrib_np.real.ravel())
         np.add.at(filt_im, (out_r_np, out_c_np), contrib_np.imag.ravel())
-        # all-nodata patches contribute NEITHER the filtered value (already 0)
-        # NOR the norm weight — the CPU kernels skip them entirely, so the
-        # GPU norm must not be inflated by their triangle window either.
-        # (all_nd is a cupy array — convert before indexing the numpy scatter
-        #  window, else cupy raises "Implicit conversion to a NumPy array is
-        #  not allowed".)
-        all_nd_np = cp.asnumpy(all_nd)
-        wf_scatter = np.broadcast_to(wf_np, (nb, psize, psize)).copy()
-        wf_scatter[all_nd_np] = 0.0
-        np.add.at(norm, (out_r_np, out_c_np), wf_scatter.ravel())
 
-    filtered = (filt_re + 1j * filt_im).astype(np.complex64)
-
-    return filtered, norm
+    return (filt_re + 1j * filt_im).astype(np.complex64)
 
 
 def _goldstein_patch_batch(psize: int) -> int:
