@@ -88,8 +88,8 @@ Issues = "https://github.com/insarlab/MintPy/issues"
 "save_explorer.py" = "mintpy.cli.save_explorer:main"
 "smallbaselineApp.py" = "mintpy.cli.smallbaselineApp:main"
 "slc2ifg.py" = "mintpy.cli.slc2ifg:main"
-"slc2ifg_engine" = "mintpy.stdproc.slc2ifg.engine.run_engine:main"
-"insarflow" = "mintpy.stdproc.slc2ifg.engine.run_engine:main"  # backward-compat alias
+"slc2ifg_engine" = "mintpy.stdproc.engine.run_engine:main"
+"insarflow" = "mintpy.stdproc.engine.run_engine:main"  # backward-compat alias
 "solid_earth_tides.py" = "mintpy.cli.solid_earth_tides:main"
 "spatial_average.py" = "mintpy.cli.spatial_average:main"
 "spatial_filter.py" = "mintpy.cli.spatial_filter:main"
@@ -133,7 +133,7 @@ slc2ifg = [
     "pyproj>=3.3",
 ]
 # the slc2ifg engine (Dask scheduling, GPU kernels, tiling, artifact mgmt)
-# lives inside mintpy.stdproc.slc2ifg.engine; dask is a hard engine dep,
+# lives inside mintpy.stdproc.engine; dask is a hard engine dep,
 # cupy is only needed for GPU kernels (engine degrades to CPU without it).
 engine = [
     "dask>=2023",
@@ -157,8 +157,8 @@ mintpy = [
     "defaults/*.cfg",
     "defaults/*.yaml",
     # slc2ifg (SLC-to-interferogram pre-processing) shipped assets
-    "stdproc/slc2ifg/template/*.cfg",
-    "stdproc/slc2ifg/bin/*",
+    "stdproc/template/*.cfg",
+    "stdproc/bin/*",
 ]
 
 [tool.setuptools_scm]

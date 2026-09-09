@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from mintpy.stdproc.slc2ifg.engine.chain import DEFAULT_CHAIN, format_chain, resolve_chain
-from mintpy.stdproc.slc2ifg.engine.config import AUTO_TOOLS, load_engine_config
+from mintpy.stdproc.engine.chain import DEFAULT_CHAIN, format_chain, resolve_chain
+from mintpy.stdproc.engine.config import AUTO_TOOLS, load_engine_config
 
 
 def test_default_chain_matches_auto_tools():
@@ -131,8 +131,8 @@ def test_default_chain_has_core_and_optional_mix():
 def _mini_engine(stages_cfg: str = '', extra: str = '', tools: str = 'auto'):
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     tmp = Path(tempfile.mkdtemp())
     inp = tmp / 'input'
@@ -162,8 +162,8 @@ def _entry_engine(tools: str = 'phsig_coh,unwrap',
     """
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     tmp = Path(tempfile.mkdtemp())
     inp = tmp / 'products'
@@ -237,7 +237,7 @@ def test_engine_tool_params():
 
 def test_gpu_tools_declared():
     """GPU tool set derived from Resource.device declarations (replacing the old hard-coded set)."""
-    from mintpy.stdproc.slc2ifg.engine.tool import gpu_tools
+    from mintpy.stdproc.engine.tool import gpu_tools
     assert gpu_tools() == ['complex_coh', 'filter', 'phsig_coh']
 
 
@@ -335,7 +335,7 @@ def test_unwrap_mask_file_param():
 def test_snaphu_sanitize_nonfinite():
     """SNAPHU-only NaN/Inf sanitization: zeroed + mask generated, user mask combined."""
     try:
-        from mintpy.stdproc.slc2ifg.unwrap_ifgram import _sanitize_nonfinite
+        from mintpy.stdproc.unwrap_ifgram import _sanitize_nonfinite
     except Exception:
         return  # osgeo unavailable locally — exercised on the server
     import numpy as np
@@ -343,9 +343,10 @@ def test_snaphu_sanitize_nonfinite():
     ifg = np.array([1 + 2j, np.nan + 1j, 3 + np.inf * 1j, 0 + 0j])
     corr = np.array([0.9, np.nan, 0.5, 0.0], dtype=np.float32)
     ifg2, corr2, mask = _sanitize_nonfinite(ifg, corr, None)
-    assert np.isnan(ifg2).any() is False and np.isinf(ifg2).any() is False
+    assert not np.isnan(ifg2).any() and not np.isinf(ifg2).any()
     assert np.allclose(ifg2, [1 + 2j, 0j, 0j, 0 + 0j])
-    assert np.allclose(corr2, [0.9, 0.0, 0.5, 0.0])
+    # corr is zeroed wherever the phase OR corr is non-finite
+    assert np.allclose(corr2, [0.9, 0.0, 0.0, 0.0])
     assert mask.tolist() == [1, 0, 0, 1]       # NaN/Inf excluded, zeros kept
     # all-finite input -> no mask
     _, _, m2 = _sanitize_nonfinite(np.array([1 + 1j]), np.array([0.5]), None)
@@ -361,7 +362,7 @@ def test_cleanup_keep_policy_stage_names():
     (node keys are 'tool#...' — matching must use the tool part)."""
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.manifest import Manifest, plan_cleanup
+    from mintpy.stdproc.engine.manifest import Manifest, plan_cleanup
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -375,7 +376,7 @@ def test_cleanup_keep_policy_stage_names():
 
         ifg = mk('generate_ifgram#single#20220105_20220117', 'fullres.int.tif')
         ml = mk('multilook#20220105_20220117', 'mli.int.tif')
-        ph = mk('phsig_coh#20220105_20220117', 'filt_mli_phsig.coh.tif')
+        ph = mk('phsig_coh#20220105_20220117', 'filt_mli.phsig.coh.tif')
         unw = mk('unwrap#20220105_20220117', 'filt_mli.unw.tif')
 
         # keep generate_ifgram + phsig products -> multilook output deleted,
@@ -399,7 +400,7 @@ def test_cleanup_keeps_pair_dir_containing_final_products():
     destroyed along with the intermediates (regression)."""
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.manifest import (
+    from mintpy.stdproc.engine.manifest import (
         Manifest,
         execute_cleanup,
         plan_cleanup,
@@ -434,7 +435,7 @@ def test_execute_cleanup_deletes_directories():
     recursively — unlink alone fails with 'Is a directory'."""
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.manifest import execute_cleanup
+    from mintpy.stdproc.engine.manifest import execute_cleanup
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -455,7 +456,7 @@ def test_output_ready_rejects_empty_and_corrupt_files():
     openable with non-trivial dimensions."""
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.tool import Tool, ToolContext
+    from mintpy.stdproc.engine.tool import Tool, ToolContext
 
     class _DummyTool(Tool):
         name = 'dummy'
@@ -560,7 +561,7 @@ def test_engine_entry_mode_tools_based():
     ph = g.nodes['phsig_coh#20220105_20220117']
     assert Path(ph.ctx.inputs['ifg']).name == 'filt_mli.int.tif'
     assert ph.deps == []                      # no upstream node
-    assert Path(ph.ctx.outputs['coh']).name == 'filt_mli_phsig.coh.tif'
+    assert Path(ph.ctx.outputs['coh']).name == 'filt_mli.phsig.coh.tif'
     # unwrap derives from the phsig node and writes into the canonical tree
     uw = g.nodes['unwrap#20220105_20220117']
     assert uw.deps == ['phsig_coh#20220105_20220117']
@@ -577,7 +578,7 @@ def test_engine_entry_mode_fullres_input():
     assert Path(f.ctx.outputs['ifg']).name == 'filt.int.tif'
     ph = g.nodes['phsig_coh#20220105_20220117']
     assert Path(ph.ctx.inputs['ifg']).name == 'filt.int.tif'
-    assert Path(ph.ctx.outputs['coh']).name == 'filt_phsig.coh.tif'
+    assert Path(ph.ctx.outputs['coh']).name == 'filt.phsig.coh.tif'
     uw = g.nodes['unwrap#20220105_20220117']
     assert Path(uw.ctx.inputs['ifg']).name == 'filt.int.tif'
     assert Path(uw.ctx.outputs['unw']).name == 'filt.unw.tif'
@@ -617,8 +618,8 @@ def test_engine_entry_mode_pairs_from_pairfile():
     """When the input root has an ifgram_list.txt, pairs come from it."""
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     tmp = Path(tempfile.mkdtemp())
     inp = tmp / 'products'
@@ -649,11 +650,11 @@ def test_engine_entry_mode_pairs_from_pairfile():
 # ------------------------------------------------------------------------
 def test_unwrap_auto_uses_complex_coh():
     """fullres + complex_coh + unwrap: unwrap consumes the complex coherence
-    (fullres_cpx.coh.tif) and depends on the complex_coh node."""
+    (fullres.cpx.coh.tif) and depends on the complex_coh node."""
     eng = _mini_engine(tools='ifgram_list,generate_ifgram,complex_coh,unwrap')
     g = eng.plan(dry_run=True)
     uw = g.nodes['unwrap#20220105_20220117']
-    assert uw.ctx.inputs['coh'].name == 'fullres_cpx.coh.tif'
+    assert uw.ctx.inputs['coh'].name == 'fullres.cpx.coh.tif'
     assert 'complex_coh#single#20220105_20220117' in uw.deps
     assert 'phsig_coh' not in g.nodes
     # unwrap has both its ifg source and the coherence node as deps
@@ -722,8 +723,8 @@ def _entry_engine_with_slcs(tools: str = 'complex_coh,unwrap'):
     """Mid-chain entry engine whose slc_input is a flat dir with SLC files."""
     import tempfile
 
-    from mintpy.stdproc.slc2ifg.engine.config import load_engine_config
-    from mintpy.stdproc.slc2ifg.engine.engine import Engine
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
 
     tmp = Path(tempfile.mkdtemp())
     inp = tmp / 'products'
@@ -754,7 +755,7 @@ def test_entry_complex_coh_from_slcs():
         'complex_coh#20220210_20220306',
     ]
     n = g.nodes['complex_coh#20220105_20220117']
-    assert n.ctx.outputs['coh'].name == 'fullres_cpx.coh.tif'
+    assert n.ctx.outputs['coh'].name == 'fullres.cpx.coh.tif'
     assert n.ctx.inputs['slc_dir'] == Path(eng.slc_input)
 
 
@@ -763,7 +764,7 @@ def test_entry_complex_coh_feeds_unwrap():
     eng = _entry_engine_with_slcs(tools='complex_coh,unwrap')
     g = eng.plan(dry_run=True)
     uw = g.nodes['unwrap#20220105_20220117']
-    assert uw.ctx.inputs['coh'].name == 'fullres_cpx.coh.tif'
+    assert uw.ctx.inputs['coh'].name == 'fullres.cpx.coh.tif'
     assert 'complex_coh#20220105_20220117' in uw.deps
     assert 'phsig_coh' not in g.nodes
 
