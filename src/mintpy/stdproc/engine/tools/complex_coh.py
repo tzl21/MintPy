@@ -32,6 +32,9 @@ _GENERATE_COH_PARAMS = [
               default='/data/VV'),
     ParamSpec('window_size', cfg='slc2ifg.generate_coh.cc_window_size',
               kind='int', default=5),
+    #: window weighting: 'triangular' (ISCE2 Bartlett, default) | 'uniform'
+    ParamSpec('window_type', cfg='slc2ifg.generate_coh.cc_window_type',
+              default='triangular'),
     ParamSpec('ps_window_size', cfg='slc2ifg.generate_coh.ps_window_size',
               kind='int', default=5),
     ParamSpec('ps_gradient_window',
@@ -83,6 +86,7 @@ class ComplexCohTool(Tool):
         use_gpu = bool(ctx.param('use_gpu', False)) and cupy_available()
         tile_size = int(ctx.param('tile_size', 0) or 0)
         window = int(ctx.param('window_size', 5))
+        window_type = ctx.param('window_type', 'triangular')
         out = ctx.output('coh')
         out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -92,7 +96,8 @@ class ComplexCohTool(Tool):
             complex_coh_tiled(str(slc1), str(slc2), str(out), window,
                               tile_size, processor,
                               tile_workers=workers, gpu=use_gpu,
-                              subdataset=ctx.param('subdataset', '/data/VV'))
+                              subdataset=ctx.param('subdataset', '/data/VV'),
+                              window_type=window_type)
             ctx.logger.info("complex_coh (tiled %d, gpu=%s): %s/%s %s",
                             tile_size, use_gpu, out.parent.name, out.name,
                             ctx.elapsed_str())
@@ -109,7 +114,8 @@ class ComplexCohTool(Tool):
             s2, _ = read_complex_image(str(slc2), processor, subdataset=sub)
             if s1.shape != s2.shape:
                 raise ValueError(f"Dimension mismatch: {s1.shape} vs {s2.shape}")
-            coh = complex_coh_block(s1, s2, window, gpu=use_gpu)
+            coh = complex_coh_block(s1, s2, window, gpu=use_gpu,
+                                    window_type=window_type)
             # Zero the outer window//2 border, matching the tiled path's
             # margin zeroing and the reference CoherenceEstimator (partial
             # windows at the border are biased and must not be emitted).

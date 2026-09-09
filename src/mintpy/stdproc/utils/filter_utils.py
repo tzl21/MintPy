@@ -19,25 +19,37 @@ def goldstein(
     psize: int = 32,
     nodata_mask: Optional[np.ndarray] = None,
     gpu: bool = False,
+    rescale_magnitude: bool = True,
 ) -> np.ndarray:
-    """Apply the Goldstein adaptive phase filter with 50% overlapping patches.
+    """Goldstein-Werner power-spectral filter, ISCE2-compatible.
 
-    Drop-in replacement for ``dolphin.goldstein.goldstein``.
+    Reproduces ISCE2 ``mroipac/filter/src/psfilt.c`` + ``rescale_magnitude.c``:
+    FFT patches of ``psize`` pixels stepped by ``psize // 2``, anchored at the
+    image origin, Bartlett weighting ``w(i) = 1 - |2*(i - psize//2)/(psize+1)|``
+    and spectral exponent ``alpha``; overlapping patches are summed with the
+    ISCE2 normalization (window already divided by ``psize**2``, no
+    per-pixel re-normalization).
 
     Parameters
     ----------
     phase : np.ndarray
         2D array of complex data (complex64) or float phase to be filtered.
     alpha : float
-        Filter exponent, must be in [0, 1].
+        Filter exponent, must be >= 0 (0 = no filtering).
     psize : int
-        Edge length of square FFT patch (power of 2 recommended).
+        Edge length of the square FFT patch (ISCE2 ``NFFT``, default 32;
+        the patch step is ``psize // 2``).
     nodata_mask : np.ndarray (bool), optional
-        Boolean mask where data is invalid. Masked pixels are zeroed
-        before FFT and restored as zero in output.
+        Boolean mask where data is invalid. Masked pixels are zeroed before
+        the FFT and restored as zero in the output (slc2ifg extension, not
+        present in ISCE2).
     gpu : bool
-        Use the CuPy batched-FFT path when available (results identical
-        to the CPU path).
+        Use the CuPy batched-FFT path when available (results identical to
+        the CPU path).
+    rescale_magnitude : bool
+        ISCE2 ``rescale_magnitude`` behaviour (default True): keep the
+        filtered phase but restore the *input* magnitude. Set False for the
+        pure power-spectral filter output.
 
     Returns
     -------
@@ -52,18 +64,13 @@ def goldstein(
         return phase.copy()
 
     orig_rows, orig_cols = phase.shape
-    pad = psize // 2
-    step = pad
-    half = pad  # psize // 2
+    step = max(1, psize // 2)
 
-    # --- triangle window (50% overlap add) ---
-    wx = (1.0 - np.abs(np.arange(half) - (psize / 2.0 - 1.0))
-          / (psize / 2.0 - 1.0))
-    wy = (1.0 - np.abs(np.arange(half) - (psize / 2.0 - 1.0))
-          / (psize / 2.0 - 1.0))
-    q = np.outer(wy, wx)
-    wf = np.block([[q, np.flip(q, 1)],
-                   [np.flip(q, 0), np.flip(np.flip(q, 0), 1)]])
+    # ISCE2 Bartlett window (psfilt.c), normalized by psize**2 exactly as the
+    # C routine does; overlapping patches are summed without re-normalizing.
+    idx = np.arange(psize, dtype=np.float64)
+    w1d = 1.0 - np.abs(2.0 * (idx - psize // 2) / (psize + 1.0))
+    wf = (np.outer(w1d, w1d) / float(psize * psize)).astype(np.float32)
 
     # --- complex conversion ---
     if np.iscomplexobj(phase):
@@ -78,30 +85,30 @@ def goldstein(
     else:
         orig_nodata = nodata_mask.copy()
 
-    # Zero-pad image and no-data mask
-    padded = np.pad(data, ((pad, pad), (pad, pad)), mode='constant')
-    nodata = np.pad(orig_nodata, ((pad, pad), (pad, pad)),
+    # Zero-extension of psize pixels past the image edge (psfilt.c reads
+    # zeros past EOF).  The patch grid itself is anchored at the image
+    # origin, so no half-patch offset is introduced.
+    pad = psize
+    padded = np.pad(data, ((0, pad), (0, pad)), mode='constant')
+    nodata = np.pad(orig_nodata, ((0, pad), (0, pad)),
                     mode='constant', constant_values=True)
     p_rows, p_cols = padded.shape
 
     filtered = np.zeros((p_rows, p_cols), dtype=np.complex64)
-    norm = np.zeros((p_rows, p_cols), dtype=np.float32)
 
     if gpu:
-        # Optional engine accelerator (lazy import): the merged mintpy GPU
-        # kernel when importable, otherwise fall back to the CPU path below.
-        # (The legacy ``insarflow`` package no longer exists — a stale import
-        # used to silently disable GPU here.)
+        # Optional engine accelerator (lazy import); falls back to CPU when
+        # the CuPy kernel is unavailable.
         try:
             from mintpy.stdproc.engine.gpu_kernels import goldstein_block
         except ImportError:
             gpu = False
         else:
-            filtered, norm = goldstein_block(
+            filtered = goldstein_block(
                 padded, nodata, alpha, psize, wf, (0, 0), gpu=True)
-    else:
-        for i in range(0, p_rows - psize + 1, step):
-            for j in range(0, p_cols - psize + 1, step):
+    if not gpu:
+        for i in range(0, orig_rows, step):
+            for j in range(0, orig_cols, step):
                 ri, rj = slice(i, i + psize), slice(j, j + psize)
                 patch = padded[ri, rj].copy()
 
@@ -111,19 +118,17 @@ def goldstein(
                 patch[nodata[ri, rj]] = 0
                 S = np.fft.fft2(patch, s=(psize, psize))
                 H = np.power(np.abs(S), alpha)
-                S = H * S
-                pf = np.fft.ifft2(S, s=(psize, psize))
-
-                w = wf[:patch.shape[0], :patch.shape[1]]
-                filtered[ri, rj] += pf * w
-                norm[ri, rj] += w
-
-    valid = norm > 0
-    filtered[valid] /= norm[valid]
+                pf = np.fft.ifft2(H * S, s=(psize, psize))
+                filtered[ri, rj] += pf * wf
 
     # Crop back to original size
-    filtered = filtered[pad:pad + orig_rows, pad:pad + orig_cols]
+    filtered = filtered[:orig_rows, :orig_cols]
     filtered[orig_nodata] = 0 + 0j
+
+    if rescale_magnitude:
+        # ISCE2 rescale_magnitude.c: keep the filtered phase, restore |input|
+        mag = np.abs(data[:orig_rows, :orig_cols])
+        filtered = (mag * np.exp(1j * np.angle(filtered))).astype(np.complex64)
 
     if np.iscomplexobj(phase):
         return filtered.astype(np.complex64)

@@ -34,6 +34,8 @@ _GENERATE_COH_PARAMS = [
               default='/data/VV'),
     ParamSpec('window_size', cfg='slc2ifg.generate_coh.cc_window_size',
               kind='int', default=5),
+    ParamSpec('window_type', cfg='slc2ifg.generate_coh.cc_window_type',
+              default='triangular'),
     ParamSpec('ps_window_size', cfg='slc2ifg.generate_coh.ps_window_size',
               kind='int', default=5),
     ParamSpec('ps_gradient_window',
