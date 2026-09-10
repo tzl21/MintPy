@@ -589,7 +589,7 @@ class Engine:
         return pair_file
 
     def _select_params(self, cfg) -> dict:
-        """Read ``slc2ifg.ifgram_list.select.*`` keys into a param dict."""
+        """Read the select-mode params (``select.*`` keys + pipeline AOI)."""
         from mintpy.stdproc.engine.config import (
             get_bool_opt,
             get_float_opt,
@@ -623,6 +623,8 @@ class Engine:
                 ('coh_stat', 'str'),
                 ('coh_usable_threshold', 'float'),
                 ('quick_window', 'int'),
+                ('quick_nlks', 'int'),
+                ('quick_max_pixels', 'int'),
                 ('quick_grid', 'int'),
                 ('quick_block', 'int'),
                 ('quick_max_workers', 'int'),
@@ -645,6 +647,17 @@ class Engine:
             val = readers[kind](cfg, key, fallback=None)
             if val is not None:
                 p[name] = val
+        # AOI: the unified pipeline bbox is not a select.* key, but the quick
+        # coherence uses it to read ONLY the AOI window of each SLC (the AOI
+        # is already cropped) instead of the whole scene.
+        wsen = (get_opt(cfg, 'slc2ifg.bbox', fallback=None)
+                or get_opt(cfg, 'slc2ifg.crop_slc.wsen', fallback=None))
+        if wsen:
+            p['bbox'] = wsen
+            p['bbox_buffer'] = get_float_opt(
+                cfg, 'slc2ifg.bbox_buffer',
+                fallback=get_float_opt(cfg, 'slc2ifg.crop_slc.buffer',
+                                       fallback=0.0)) or 0.0
         # config keys select.report / select.dot (param names report_file/dot_file)
         rpt = get_opt(cfg, 'slc2ifg.ifgram_list.select.report', fallback=None)
         if rpt:

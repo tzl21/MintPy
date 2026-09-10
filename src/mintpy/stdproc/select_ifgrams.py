@@ -105,11 +105,19 @@ DEFAULT_PARAMS: Dict[str, object] = {
     'coh_variant': 'filt_mli',       # fullres | mli | filt | filt_mli
     'coh_stat': 'mean',              # mean | median | usable_frac | fisher
     'coh_usable_threshold': 0.3,     # for stat='usable_frac'
-    # measured weights from on-the-fly complex coherence on grid-sampled SLCs
-    # (sampling: grid x grid windows of block x block px; no whole-image read)
+    # measured weights from on-the-fly complex coherence on SLCs
+    # With bbox (+ bbox_buffer): read ONLY that window of each SLC and
+    # block-average it by quick_nlks (no whole-image read); the AOI is
+    # already cropped, so the default downsampling is 1 (full window res).
+    # Without bbox: read a grid x grid sample of block x block px windows
+    # over the whole scene (no whole-image read either).
+    'bbox': None,                    # WSEN (W S E N) AOI for quick coherence
+    'bbox_buffer': 0.0,              # extra margin around bbox, degrees
     'quick_window': 5,               # coherence estimation window
-    'quick_grid': 12,                # sampling grid per side (12x12 windows)
-    'quick_block': 16,               # sampled window size in pixels (16x16)
+    'quick_nlks': 1,                 # block-mean downsampling of the bbox window
+    'quick_max_pixels': 1_048_576,   # cap on the bbox window size
+    'quick_grid': 12,                # sampling grid per side (no-bbox path)
+    'quick_block': 16,               # sampled window size in px (no-bbox path)
     'quick_debias': True,            # Touzi (1999) bias correction
     'quick_stat': 'mean',            # mean | median | usable_frac | fisher
     'quick_usable_threshold': 0.3,
@@ -147,6 +155,27 @@ def _validate_pairs(dates: Sequence[str], pairs: Iterable[Tuple[str, str]]) -> N
         if a not in known or b not in known:
             raise ValueError(
                 f"pair {a}-{b} references a date outside the date list")
+
+
+def _as_bbox(value: object) -> Optional[Tuple[float, float, float, float]]:
+    """Normalize a WSEN bbox to a 4-float tuple (``None`` when disabled).
+
+    Accepts ``None`` / a "disable" token / a 4-sequence of numbers / a
+    ``"W S E N"`` (or comma-separated) string, so the engine config, the
+    basic executor and the CLI can all feed the same parameter.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        if v.lower() in ('', 'auto', 'none', 'off', '0'):
+            return None
+        from .crop_slc_geo import parse_wsen
+        return parse_wsen(v)
+    vals = tuple(float(x) for x in value)
+    if len(vals) != 4:
+        raise ValueError(f"bbox must be 4 numbers (W S E N), got {value!r}")
+    return vals
 
 
 def parse_annual_windows(value: object) -> Optional[Tuple[Tuple[int, int], ...]]:
@@ -696,6 +725,59 @@ def _read_sampled_slc(
     return out
 
 
+def _read_windowed_slc(
+    path: str,
+    window: Tuple[int, int, int, int],
+    factor: int = 1,
+    subdataset: Optional[str] = None,
+) -> np.ndarray:
+    """Read one SLC window ``(x0, y0, w, h)``, block-mean downsampled.
+
+    Used for the AOI path: with ``slc2ifg.bbox`` (+ ``bbox_buffer``) the
+    SLC is already cropped to that region, so reading the whole scene is
+    pointless.  GDAL reads *only* the requested window, and
+    ``buf_xsize``/``buf_ysize`` + ``GRIORA_Average`` block-average it by
+    ``factor`` (``factor=1`` = full window resolution), keeping peak memory
+    proportional to the window rather than the scene.
+
+    For OPERA-style GSLC ``.h5`` files, ``subdataset`` (e.g. ``/data/VV``)
+    is opened through the NETCDF driver — the same convention as
+    ``utils.slc2ifg_utils.open_gdal`` and dolphin's VRT sources.
+    """
+    from osgeo import gdal  # lazy
+
+    gdal.UseExceptions()
+    p = str(path)
+    if subdataset and p.lower().endswith(('.h5', '.hdf5')):
+        ds = gdal.Open(f'NETCDF:"{p}":"//{str(subdataset).lstrip("/")}"')
+    else:
+        ds = gdal.Open(p)
+    x0, y0, w, h = (int(v) for v in window)
+    factor = max(1, int(factor))
+    buf_w, buf_h = max(1, w // factor), max(1, h // factor)
+
+    def _read_band(band):
+        try:
+            return band.ReadAsArray(x0, y0, w, h, buf_xsize=buf_w,
+                                    buf_ysize=buf_h,
+                                    resample_alg=gdal.GRIORA_Average)
+        except Exception:  # pragma: no cover - driver without Average support
+            return band.ReadAsArray(x0, y0, w, h, buf_xsize=buf_w,
+                                    buf_ysize=buf_h,
+                                    resample_alg=gdal.GRIORA_NearestNeighbour)
+
+    if ds.RasterCount == 2:
+        real = _read_band(ds.GetRasterBand(1))
+        imag = _read_band(ds.GetRasterBand(2))
+        arr = (real + 1j * imag).astype(np.complex64)
+    else:
+        arr = _read_band(ds.GetRasterBand(1))
+        if arr.dtype not in (np.complex64, np.complex128):
+            arr = arr.astype(np.complex64)
+    ds = None
+    return np.asarray(arr)
+
+
 def _boxcar_coherence(slc1: np.ndarray, slc2: np.ndarray,
                       window: int) -> np.ndarray:
     """Complex coherence magnitude (boxcar, scipy correlate) of two SLCs."""
@@ -734,30 +816,37 @@ def quick_coherence_weights(
     slc_dir: str,
     processor: str = 'isce3',
     slc_pattern: Optional[str] = None,
-    nlks: int = 8,
+    nlks: int = 1,
     window: int = 5,
     max_pixels: int = 1_048_576,
     grid: int = 12,
     block: int = 16,
+    bbox: Optional[object] = None,
+    bbox_buffer: float = 0.0,
     debias: bool = True,
     stat: str = 'mean',
     usable_threshold: float = 0.3,
     subdataset: str = '/data/VV',
     max_workers: int = 1,
 ) -> Dict[Tuple[str, str], Optional[float]]:
-    """Pair quality from complex coherence on *grid-sampled* SLCs.
+    """Pair quality from complex coherence on SLCs.
 
-    This is the "fully connected on a coarse sample" screening: each SLC is
-    read as a regular ``grid x grid`` sample of ``block x block`` windows
-    (0.04% of the pixels, ~9000x less I/O than the old whole-image
-    resampled read), the complex correlation magnitude is estimated with a
-    small boxcar, and the per-pair weight is a robust statistic of the map.
-    Cheap enough to run over every candidate pair, accurate enough to order
-    them by coherence.
+    Two sampling paths, neither of which reads the whole image:
 
-    ``grid``/``block`` control the sampling density (default 12x12 windows
-    of 16x16 px -> 192x192 sample).  ``nlks``/``max_pixels`` are accepted
-    for backward compatibility and no longer drive a whole-image read.
+    * **AOI path** (``bbox`` given): ``bbox`` (+ ``bbox_buffer`` degrees) is
+      mapped to the pixel window of each SLC (``crop_slc_geo.bbox_to_window``)
+      and only that window is read, block-averaged by ``nlks``
+      (``nlks=1`` = full window resolution, the default: the AOI is already
+      cropped, so there is little to gain from downsampling).  ``max_pixels``
+      caps the window and raises the factor automatically for huge AOIs.
+    * **whole-scene path** (no ``bbox``): each SLC is read as a regular
+      ``grid x grid`` sample of ``block x block`` windows (0.04% of the
+      pixels, ~9000x less I/O), tiled into one small mosaic.
+
+    The complex correlation magnitude is then estimated with a small
+    ``window`` boxcar (Touzi-debiased when ``debias``) and reduced to a
+    per-pair weight by ``stat``.  Cheap enough to run over every candidate
+    pair, accurate enough to order them by coherence.
 
     ``max_workers > 1`` parallelises the per-pair coherence with a thread
     pool (the sampled SLCs are loaded once up front, so the parallel
@@ -779,26 +868,68 @@ def quick_coherence_weights(
                        slc_dir, pattern)
         return {(a, b): None for a, b in pairs}
     f0 = find_slc_file_by_date(slc_dirs, first, pattern)
-    ds0 = gdal.Open(str(f0))
-    rows, cols = ds0.RasterYSize, ds0.RasterXSize
-    ds0 = None
+
+    bbox = _as_bbox(bbox)
+    use_bbox = bbox is not None
+    bbox_win = None
+    if use_bbox:
+        from .crop_slc_geo import bbox_to_window
+
+        try:
+            bbox_win = bbox_to_window(str(f0), bbox, subdataset, bbox_buffer)
+        except ValueError as ex:
+            logger.warning(
+                "quick coherence: bbox window unavailable for %s (%s); "
+                "falling back to whole-scene grid sampling", f0, ex)
+            use_bbox = False
+    if use_bbox and bbox_win is None:
+        logger.warning("quick coherence: bbox %s does not intersect %s",
+                       bbox, f0)
+        return {(a, b): None for a, b in pairs}
+
     grid = max(1, int(grid))
     block = max(1, int(block))
-    logger.info("quick coherence: %dx%d SLC -> %dx%d sample (%dx%d grid of %dx%d blocks, workers=%d)",
-                rows, cols, grid * block, grid * block, grid, grid,
-                block, block, int(max_workers))
+    nlks = max(1, int(nlks))
+    if use_bbox:
+        logger.info(
+            "quick coherence: AOI bbox %s (+%g deg buffer) -> %dx%d px window "
+            "of %s; block-mean nlks=%d (workers=%d)",
+            bbox, float(bbox_buffer), bbox_win[2], bbox_win[3],
+            Path(f0).name, nlks, int(max_workers))
+    else:
+        ds0 = gdal.Open(str(f0))
+        rows, cols = ds0.RasterYSize, ds0.RasterXSize
+        ds0 = None
+        logger.info("quick coherence: %dx%d SLC -> %dx%d sample (%dx%d grid of %dx%d blocks, workers=%d)",
+                    rows, cols, grid * block, grid * block, grid, grid,
+                    block, block, int(max_workers))
 
     # load every sampled SLC once (serial, cheap); missing -> None
     cache: Dict[str, Optional[np.ndarray]] = {}
+    looks_of: Dict[str, int] = {}
     for d in sorted({x for p in pairs for x in p}):
         f = find_slc_file_by_date(slc_dirs, d, pattern)
         if f is None:
             cache[d] = None
             continue
-        cache[d] = _read_sampled_slc(str(f), grid=grid, block=block,
-                                     subdataset=subdataset)
-
-    looks = (block * window) ** 2
+        if use_bbox:
+            win = bbox_to_window(str(f), bbox, subdataset, bbox_buffer)
+            if win is None:
+                logger.warning("quick coherence: bbox does not intersect %s", f)
+                cache[d] = None
+                continue
+            w, h = int(win[2]), int(win[3])
+            factor = nlks
+            if max_pixels and w * h > int(max_pixels):
+                factor = max(factor, int(math.ceil(
+                    math.sqrt(w * h / int(max_pixels)))))
+            cache[d] = _read_windowed_slc(str(f), win, factor,
+                                          subdataset=subdataset)
+            looks_of[d] = factor
+        else:
+            cache[d] = _read_sampled_slc(str(f), grid=grid, block=block,
+                                         subdataset=subdataset)
+            looks_of[d] = block
 
     def _one(pair: Tuple[str, str]) -> Tuple[Tuple[str, str], Optional[float]]:
         a, b = pair
@@ -808,7 +939,10 @@ def quick_coherence_weights(
             return pair, None
         coh = _boxcar_coherence(s1, s2, int(window))
         if debias:
-            coh = _debias_coherence(coh, looks)
+            # every sample averages `factor` px per side (block-mean
+            # downsampling, or the grid mosaic), giving (factor*window)^2 looks
+            factor = min(looks_of.get(a, 1), looks_of.get(b, 1))
+            coh = _debias_coherence(coh, (factor * int(window)) ** 2)
         return pair, aggregate_coherence(coh, stat, usable_threshold)
 
     pairs = list(pairs)
@@ -1217,11 +1351,13 @@ def select_pairs(
                 dates, candidates, str(slc_dir),
                 processor=processor,
                 slc_pattern=p.get('slc_pattern'),
-                nlks=int(p.get('quick_nlks') or 8),
+                nlks=int(p.get('quick_nlks') or 1),
                 window=int(p.get('quick_window') or 5),
                 max_pixels=int(p.get('quick_max_pixels') or 1_048_576),
                 grid=int(p.get('quick_grid') or 12),
                 block=int(p.get('quick_block') or 16),
+                bbox=_as_bbox(p.get('bbox')),
+                bbox_buffer=float(p.get('bbox_buffer') or 0.0),
                 debias=_as_bool(p.get('quick_debias', True), default=True),
                 stat=str(p.get('quick_stat') or 'mean'),
                 usable_threshold=float(p.get('quick_usable_threshold') or 0.3),

@@ -818,9 +818,10 @@ def _install_fake_osgeo(sources):
                         resample_alg=None):
             a = (self._arr if self._arr.ndim == 2
                  else self._arr[self._index - 1])
-            # grid-sampling window read: (xoff, yoff, xsize, ysize)
+            # window read: (xoff, yoff, xsize, ysize)
             if xoff is not None and yoff is not None and xsize and ysize:
-                return a[yoff:yoff + ysize, xoff:xoff + xsize].copy()
+                a = a[yoff:yoff + ysize, xoff:xoff + xsize]
+            # optional block-mean / strided resample to (buf_ysize, buf_xsize)
             if buf_xsize and buf_ysize:
                 rows, cols = a.shape
                 fy, fx = max(1, rows // buf_ysize), max(1, cols // buf_xsize)
@@ -828,7 +829,7 @@ def _install_fake_osgeo(sources):
                     a = a.reshape(rows // fy, fy, cols // fx, fx).mean(axis=(1, 3))
                 else:
                     a = a[::fy, ::fx]
-            return a
+            return np.asarray(a)
 
     class FakeDataset:
         def __init__(self, arr):
@@ -924,6 +925,85 @@ def test_quick_coherence_weights(tmp_path):
         assert w2[('20230105', '20230129')] is not None
     finally:
         _uninstall_fake_osgeo()
+
+
+def test_quick_coherence_bbox_window(tmp_path, monkeypatch):
+    """With a bbox, quick coherence reads ONLY the AOI window of each SLC
+    (no whole-scene read) and block-averages it by nlks."""
+    import mintpy.stdproc.crop_slc_geo as csg
+
+    from mintpy.stdproc.select_ifgrams import (
+        _read_windowed_slc,
+        quick_coherence_weights,
+    )
+
+    rng = np.random.default_rng(11)
+    slc_dir = tmp_path / 'slc'
+    slc_dir.mkdir()
+    dates = ['20230105', '20230117', '20230129']
+    sources = {}
+    for d in dates:
+        (slc_dir / f'{d}.slc.tif').touch()
+        sources[str(slc_dir / f'{d}.slc.tif')] = (
+            rng.normal(size=(64, 64)) + 1j * rng.normal(size=(64, 64))
+        ).astype(np.complex64)
+    sources[str(slc_dir / '20230129.slc.tif')] = sources[str(slc_dir / '20230105.slc.tif')]
+
+    seen = []
+
+    def fake_bbox_to_window(path, wsen, subdataset='/data/VV', buffer=0.0):
+        seen.append((tuple(wsen), float(buffer)))
+        return (8, 8, 32, 32)
+
+    monkeypatch.setattr(csg, 'bbox_to_window', fake_bbox_to_window)
+
+    _install_fake_osgeo(sources)
+    try:
+        pairs = [('20230105', '20230129'), ('20230105', '20230117')]
+        w = quick_coherence_weights(
+            dates, pairs, str(slc_dir), processor='isce3',
+            bbox=(1.0, 2.0, 3.0, 4.0), bbox_buffer=0.01,
+            nlks=2, window=5, debias=True, stat='mean')
+        assert seen, "the bbox must be mapped to a pixel window"
+        assert seen[0] == ((1.0, 2.0, 3.0, 4.0), 0.01)
+        hi = w[('20230105', '20230129')]
+        lo = w[('20230105', '20230117')]
+        assert hi is not None and lo is not None
+        assert hi > 0.9, f"identical scenes should be highly coherent, got {hi}"
+        assert lo < hi, "independent scenes must rank below identical ones"
+
+        # nlks=2 -> the 32x32 window read as 16x16 (block-mean)
+        assert _read_windowed_slc(
+            str(slc_dir / '20230105.slc.tif'), (8, 8, 32, 32), 2).shape == (16, 16)
+        # nlks=1 -> the full window resolution
+        assert _read_windowed_slc(
+            str(slc_dir / '20230105.slc.tif'), (8, 8, 32, 32), 1).shape == (32, 32)
+
+        # a bbox with no overlap -> every pair is unweighted (None)
+        monkeypatch.setattr(csg, 'bbox_to_window', lambda *a, **k: None)
+        w2 = quick_coherence_weights(
+            dates, pairs, str(slc_dir), processor='isce3',
+            bbox=(1.0, 2.0, 3.0, 4.0))
+        assert all(v is None for v in w2.values())
+    finally:
+        _uninstall_fake_osgeo()
+
+
+def test_as_bbox_normalization():
+    """_as_bbox accepts None / 'auto' / 4-sequence / 'W S E N' string."""
+    from mintpy.stdproc.select_ifgrams import _as_bbox
+
+    assert _as_bbox(None) is None
+    assert _as_bbox('auto') is None
+    assert _as_bbox(' none ') is None
+    assert _as_bbox([1, 2, 3, 4]) == (1.0, 2.0, 3.0, 4.0)
+    assert _as_bbox('144.88 13.52 144.97 13.61') == (
+        144.88, 13.52, 144.97, 13.61)
+    assert _as_bbox('144.88,13.52,144.97,13.61') == (
+        144.88, 13.52, 144.97, 13.61)
+    import pytest
+    with pytest.raises(ValueError):
+        _as_bbox([1, 2, 3])
 
 
 def test_quick_coherence_two_band_isce2(tmp_path):
