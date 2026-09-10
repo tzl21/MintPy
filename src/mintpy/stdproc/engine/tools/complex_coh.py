@@ -44,6 +44,17 @@ _GENERATE_COH_PARAMS = [
               kind='bool', default=False),
 ]
 
+#: Read-time AOI crop (not a generate_coh.* key): with crop_slc absent from
+#: the chain, complex_coh reads only the slc2ifg.bbox window of each SLC, so
+#: its output matches the windowed generate_ifgram product (and unwrap's
+#: coherence-shape check passes) without materialising cropped SLCs.
+_COMPLEX_COH_AOI_PARAMS = [
+    ParamSpec('bbox', cfg='slc2ifg.bbox',
+              legacy_cfg='slc2ifg.crop_slc.wsen'),
+    ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer', kind='float',
+              legacy_cfg='slc2ifg.crop_slc.buffer'),
+]
+
 
 @register
 class ComplexCohTool(Tool):
@@ -58,7 +69,7 @@ class ComplexCohTool(Tool):
     outputs = [Port('coh', 'file', variant='fullres', ext='.cpx.coh[.tif]')]
     resource = Resource(device='gpu', mem_estimate_gb=2.0,
                         gpu_mem_estimate_gb=1.0)
-    params_spec = list(_GENERATE_COH_PARAMS)
+    params_spec = list(_GENERATE_COH_PARAMS) + list(_COMPLEX_COH_AOI_PARAMS)
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
         skipped = self.skip_if_exists(ctx)
@@ -87,8 +98,27 @@ class ComplexCohTool(Tool):
         tile_size = int(ctx.param('tile_size', 0) or 0)
         window = int(ctx.param('window_size', 5))
         window_type = ctx.param('window_type', 'triangular')
+        sub = ctx.param('subdataset', '/data/VV')
         out = ctx.output('coh')
         out.parent.mkdir(parents=True, exist_ok=True)
+
+        # Read-time crop: compute only the slc2ifg.bbox window so the
+        # coherence raster matches the windowed interferogram.  The engine
+        # drops bbox when the crop_slc stage is active (SLCs already cropped).
+        crop_window = None
+        bbox = ctx.param('bbox')
+        if bbox:
+            from mintpy.stdproc.crop_slc_geo import bbox_to_window, parse_wsen
+            bbox_buffer = float(ctx.param('bbox_buffer', 0.0) or 0.0)
+            crop_window = bbox_to_window(
+                str(slc1), parse_wsen(str(bbox)), sub, bbox_buffer)
+            if crop_window is None:
+                raise ValueError(
+                    f"bbox {bbox} does not intersect SLC {slc1} "
+                    f"for complex_coh {d1}_{d2}")
+            ctx.logger.info(
+                "complex_coh: AOI bbox %s (+%g deg) -> %dx%d px window",
+                bbox, bbox_buffer, crop_window[2], crop_window[3])
 
         if tile_size > 0:
             from mintpy.stdproc.engine.tiling import complex_coh_tiled
@@ -96,8 +126,9 @@ class ComplexCohTool(Tool):
             complex_coh_tiled(str(slc1), str(slc2), str(out), window,
                               tile_size, processor,
                               tile_workers=workers, gpu=use_gpu,
-                              subdataset=ctx.param('subdataset', '/data/VV'),
-                              window_type=window_type)
+                              subdataset=sub,
+                              window_type=window_type,
+                              crop_window=crop_window)
             ctx.logger.info("complex_coh (tiled %d, gpu=%s): %s/%s %s",
                             tile_size, use_gpu, out.parent.name, out.name,
                             ctx.elapsed_str())
@@ -109,9 +140,10 @@ class ComplexCohTool(Tool):
             )
             from mintpy.stdproc.utils.slc2ifg_utils import create_xml_for_binary
 
-            sub = ctx.param('subdataset', '/data/VV')
-            s1, meta = read_complex_image(str(slc1), processor, subdataset=sub)
-            s2, _ = read_complex_image(str(slc2), processor, subdataset=sub)
+            s1, meta = read_complex_image(str(slc1), processor, subdataset=sub,
+                                          window=crop_window)
+            s2, _ = read_complex_image(str(slc2), processor, subdataset=sub,
+                                       window=crop_window)
             if s1.shape != s2.shape:
                 raise ValueError(f"Dimension mismatch: {s1.shape} vs {s2.shape}")
             coh = complex_coh_block(s1, s2, window, gpu=use_gpu,
