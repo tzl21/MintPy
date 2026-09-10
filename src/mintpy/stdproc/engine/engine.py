@@ -253,7 +253,8 @@ class Engine:
                 if do_cpx:
                     ckey = f"complex_coh#{b or 'single'}#{dp}"
                     cnode = self._make_complex_coh_node(ckey, b, slc_dir, ifg_out,
-                                                        d1, d2, pair_file)
+                                                        d1, d2, pair_file,
+                                                        read_crop=not has_crop)
                     g.add_node(cnode)
                     cpx_nodes[(b, dp)] = ckey
                     if has_crop:
@@ -724,9 +725,20 @@ class Engine:
 
     def _make_complex_coh_node(self, key: str, burst: Optional[str],
                                slc_dir: Path, out_dir: Path,
-                               d1: str, d2: str, pair_file: Path) -> TaskNode:
+                               d1: str, d2: str, pair_file: Path,
+                               read_crop: bool = True) -> TaskNode:
+        """Build the per-pair complex-coherence node.
+
+        ``read_crop`` enables the read-time AOI crop (same convention as
+        ``_make_generate_ifgram_node``): when False (crop_slc stage active)
+        the SLCs are already cropped and the bbox params are dropped.
+        """
         tool = get_tool('complex_coh')
         coh_path = naming.coh_path(out_dir, d1, d2, 'fullres', 'cpx', self.processor)
+        params = self._tool_params('complex_coh')
+        if not read_crop:
+            params.pop('bbox', None)
+            params.pop('bbox_buffer', None)
         ctx = ToolContext(
             tool_name=tool.name,
             inputs={
@@ -737,7 +749,7 @@ class Engine:
                 'burst': burst,
             },
             outputs={'coh': coh_path},
-            params=self._tool_params('complex_coh'),
+            params=params,
             work_dir=self.engine_dir,
         )
         return TaskNode(key=key, tool=tool, label=f"complex_coh {d1}_{d2}", ctx=ctx)

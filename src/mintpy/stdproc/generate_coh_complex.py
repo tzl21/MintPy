@@ -200,11 +200,16 @@ class CoherenceEstimator:
 
 
 def read_complex_image(filename: str, processor: str,
-                       subdataset: str = '/data/VV') -> Tuple[np.ndarray, Dict[str, Any]]:
+                       subdataset: str = '/data/VV',
+                       window: Optional[Tuple[int, int, int, int]] = None,
+                       ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Read a complex SLC image with processor-specific format awareness.
 
     ``subdataset`` selects the HDF5 dataset for ``.h5`` inputs (OPERA CSLC
-    style, e.g. ``/data/VV``).
+    style, e.g. ``/data/VV``).  ``window`` ``(x0, y0, w, h)`` reads *only*
+    that pixel window (the read-time AOI crop); the returned metadata then
+    carries the window's own size and geotransform, so a product written from
+    it is georeferenced to the window rather than to the full scene.
     """
     ext = Path(filename).suffix.lower()
     if processor == 'isce2':
@@ -226,16 +231,40 @@ def read_complex_image(filename: str, processor: str,
     if ds is None:
         raise ValueError(f"Cannot open file: {filename}")
 
+    gt = ds.GetGeoTransform()
+    full_rows, full_cols = ds.RasterYSize, ds.RasterXSize
+    if window is not None:
+        x0, y0, w, h = (int(v) for v in window)
+        if x0 < 0 or y0 < 0 or x0 >= full_cols or y0 >= full_rows:
+            raise ValueError(
+                f"window {window} is outside {filename} "
+                f"({full_cols}x{full_rows})")
+        w = max(1, min(w, full_cols - x0))
+        h = max(1, min(h, full_rows - y0))
+        if gt is not None:
+            # shift the geotransform to the window origin (x0, y0)
+            gt = (gt[0] + x0 * gt[1] + y0 * gt[2], gt[1], gt[2],
+                  gt[3] + x0 * gt[4] + y0 * gt[5], gt[4], gt[5])
+    else:
+        x0 = y0 = 0
+        w, h = full_cols, full_rows
+
+    def _read(band):
+        if window is None:
+            return band.ReadAsArray()
+        return band.ReadAsArray(x0, y0, w, h)
+
     metadata = {
-        'transform': ds.GetGeoTransform(),
+        'transform': gt,
         'projection': ds.GetProjection(),
-        'rows': ds.RasterYSize,
-        'cols': ds.RasterXSize,
+        'rows': h,
+        'cols': w,
         'band_count': ds.RasterCount,
+        'window': None if window is None else (x0, y0, w, h),
     }
 
     if metadata['band_count'] == 1:
-        data = ds.GetRasterBand(1).ReadAsArray()
+        data = _read(ds.GetRasterBand(1))
         if data.dtype not in (np.complex64, np.complex128):
             logger.warning(
                 "%s: band 1 is real-valued (dtype %s) — casting to complex "
@@ -243,8 +272,8 @@ def read_complex_image(filename: str, processor: str,
                 "complex data", filename, data.dtype)
             data = data.astype(np.complex64)
     elif metadata['band_count'] == 2:
-        real = ds.GetRasterBand(1).ReadAsArray()
-        imag = ds.GetRasterBand(2).ReadAsArray()
+        real = _read(ds.GetRasterBand(1))
+        imag = _read(ds.GetRasterBand(2))
         data = (real + 1j * imag).astype(np.complex64)
     else:
         raise ValueError(f"Unsupported band count: {metadata['band_count']}")

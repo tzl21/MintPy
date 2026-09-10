@@ -140,13 +140,22 @@ def _gdal_dtype_for(arr: np.ndarray) -> int:
 
 
 def _open_like(input_file, output_file, rows: int, cols: int, gdt: int,
-               processor: str, subdataset: Optional[str] = None):
-    """Create an output dataset with the input's georeferencing."""
+               processor: str, subdataset: Optional[str] = None,
+               origin: Optional[Tuple[int, int]] = None):
+    """Create an output dataset with the input's georeferencing.
+
+    ``origin`` ``(x0, y0)`` shifts the input geotransform to that pixel, so a
+    windowed (read-time-cropped) product keeps the correct georeferencing.
+    """
     from mintpy.stdproc.utils.slc2ifg_utils import open_gdal
     src = open_gdal(input_file, subdataset)
     gt = src.GetGeoTransform()
     proj = src.GetProjection()
     src = None
+    if gt is not None and origin is not None:
+        x0, y0 = int(origin[0]), int(origin[1])
+        gt = (gt[0] + x0 * gt[1] + y0 * gt[2], gt[1], gt[2],
+              gt[3] + x0 * gt[4] + y0 * gt[5], gt[4], gt[5])
     driver_name = 'GTiff' if processor == 'isce3' else 'ENVI'
     options = (['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER']
                if processor == 'isce3' else [])
@@ -299,11 +308,15 @@ def complex_coh_tiled(
     gpu: bool = False,
     subdataset: str = '/data/VV',
     window_type: str = 'triangular',
+    crop_window: Optional[Tuple[int, int, int, int]] = None,
 ) -> str:
     """Tiled windowed complex coherence between two SLC files.
 
     ``subdataset`` selects the HDF5 dataset for ``.h5`` SLC inputs;
     ``window_type`` is 'triangular' (ISCE2 Bartlett, default) or 'uniform'.
+    ``crop_window`` ``(x0, y0, w, h)`` restricts the computation to that pixel
+    window (read-time AOI crop) and georeferences the output to it; the
+    result is identical to the untiled, windowed computation.
     """
     from mintpy.stdproc.engine.gpu_kernels import complex_coh_block
     from mintpy.stdproc.utils.slc2ifg_utils import open_gdal
@@ -318,8 +331,24 @@ def complex_coh_tiled(
 
     # Two-file variant: read both blocks inside the worker
     src1 = open_gdal(slc1_file, subdataset)
-    rows, cols = src1.RasterYSize, src1.RasterXSize
+    full_rows, full_cols = src1.RasterYSize, src1.RasterXSize
     src1 = None
+    if crop_window is not None:
+        x0, y0, w, h = (int(v) for v in crop_window)
+        if x0 < 0 or y0 < 0 or x0 >= full_cols or y0 >= full_rows:
+            raise ValueError(
+                f"crop_window {crop_window} is outside {slc1_file} "
+                f"({full_cols}x{full_rows})")
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        w = max(1, min(w, full_cols - x0))
+        h = max(1, min(h, full_rows - y0))
+        origin: Optional[Tuple[int, int]] = (x0, y0)
+    else:
+        x0 = y0 = 0
+        w, h = full_cols, full_rows
+        origin = None
+    rows, cols = h, w
 
     jobs = list(tile_jobs(rows, cols, tile_size, overlap))
 
@@ -329,8 +358,9 @@ def complex_coh_tiled(
             a = open_gdal(slc1_file, subdataset)
             b = open_gdal(slc2_file, subdataset)
             try:
-                s1 = _read_block(a, pr0, pr1, pc0, pc1)
-                s2 = _read_block(b, pr0, pr1, pc0, pc1)
+                # tile coords are local to the crop window -> add the origin
+                s1 = _read_block(a, y0 + pr0, y0 + pr1, x0 + pc0, x0 + pc1)
+                s2 = _read_block(b, y0 + pr0, y0 + pr1, x0 + pc0, x0 + pc1)
             finally:
                 a = b = None
             if s1.dtype not in (np.complex64, np.complex128):
@@ -342,7 +372,8 @@ def complex_coh_tiled(
 
     def run(target: str) -> None:
         out_ds = _open_like(slc1_file, target, rows, cols,
-                            gdal.GDT_Float32, processor, subdataset=subdataset)
+                            gdal.GDT_Float32, processor, subdataset=subdataset,
+                            origin=origin)
         out_ds = None  # noqa: F841 -- closes the create handle (GTiff stays 0 bytes until closed)
 
         def write(_i: int, job, res: np.ndarray) -> None:
