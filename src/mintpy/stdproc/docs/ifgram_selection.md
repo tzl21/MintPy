@@ -3,7 +3,7 @@
 This document develops the theory behind selecting a *small, high-quality,
 connected* interferogram network for SBAS time-series inversion, and
 describes the algorithm implemented in
-`mintpy.stdproc.select_ifgrams` (engine mode
+`mintpy.stdproc.slc2ifg.select_ifgrams` (engine mode
 `slc2ifg.ifgram_list.mode = select`).
 
 > **Looking for the mechanics?** A mode-by-mode deep dive of
@@ -152,12 +152,12 @@ Implemented in `select_ifgrams.select_ifgrams`; orchestrated by
 * **"fully connected on a small window / downsampled SLCs"** —
   `num_connections = 0`, `annual_windows = none`, `temp_baseline_max = N`
   (or any window), then let `weight_source = coherence` with the
-  on-the-fly quick coherence: every candidate is screened on a grid
-  sample of the SLCs (`quick_grid`×`quick_grid` of `quick_block`×
-  `quick_block` windows), which costs milliseconds per pair, and the
-  selection keeps only the high-coherence ones. For large `N`, prefer
-  capping `temp_baseline_max` so the `N(N-1)/2` candidate set stays
-  manageable.
+  on-the-fly quick coherence: every candidate is screened on the AOI
+  window of the SLCs (or, without `slc2ifg.bbox`, on a `quick_grid`×
+  `quick_grid` sample of `quick_block`×`quick_block` windows), which costs
+  milliseconds per pair, and the selection keeps only the high-coherence
+  ones. For large `N`, prefer capping `temp_baseline_max` so the
+  `N(N-1)/2` candidate set stays manageable.
 
 ### 3.2 Quality weights
 
@@ -165,7 +165,7 @@ Implemented in `select_ifgrams.select_ifgrams`; orchestrated by
 |---|---|---|
 | `model` | `gamma0 * exp(-dt/tau)` | no SLCs/coherence handy; cold start; stable scenes |
 | `coherence` (rasters) | mean / median / usable-fraction / Fisher info of an existing `coh` map | reuse a pilot run's coherence products |
-| `coherence` (quick) | same statistics of complex coherence computed on **downsampled** SLCs (Touzi debias) | the standard choice; SLCs are already available |
+| `coherence` (quick) | same statistics of complex coherence computed on the **AOI window** (or a whole-scene grid sample) of the SLCs (Touzi debias) | the standard choice; SLCs are already available |
 | `mixed` | measured where present, model fills gaps | robustness against missing rasters |
 
 `usable_frac` (fraction of pixels with coherence >= a threshold) is a
@@ -210,7 +210,7 @@ as JSON. The engine logs a one-line summary during graph building.
 slc2ifg.ifgram_list.mode = select
 
 # 3-NN skeleton + half-year / one-year pairs, ranked by measured
-# coherence computed on downsampled SLCs (no extra products needed)
+# coherence computed on the SLCs (no extra products needed)
 slc2ifg.ifgram_list.select.weight_source = coherence
 slc2ifg.ifgram_list.select.min_degree = 2
 slc2ifg.ifgram_list.select.robust = true
@@ -221,9 +221,18 @@ slc2ifg.ifgram_list.select.report = ifgram_selection.json
 # slc2ifg.ifgram_list.select.annual_windows = 182:10,365:15   # or auto (default)
 # slc2ifg.ifgram_list.select.temp_baseline_max = 60
 # slc2ifg.ifgram_list.select.quick_window = 5
+# slc2ifg.ifgram_list.select.quick_nlks = 1                   # bbox-window downsampling
 # slc2ifg.ifgram_list.select.max_pairs = 300
 # slc2ifg.ifgram_list.select.quality_threshold = 0.3
 ```
+
+With `slc2ifg.bbox` (and `slc2ifg.bbox_buffer`) set, the quick coherence
+reads **only that window of each SLC** — the AOI is already cropped, so
+there is no reason to touch the rest of the scene. `quick_nlks` then
+block-averages the window (default `1` = full window resolution, because
+the cropped AOI is small); `quick_max_pixels` caps the window and raises
+the factor automatically for very large AOIs. Without a bbox, the
+whole-scene grid sample (`quick_grid` x `quick_block`) is used instead.
 
 The selection runs eagerly during graph construction (the graph topology
 depends on it), the same way `sequential` mode does today.
@@ -231,7 +240,7 @@ depends on it), the same way `sequential` mode does today.
 ### 4.2 Standalone CLI
 
 ```bash
-python mintpy.stdproc.ifgram_list --slc ./slc --mode select \
+python mintpy.stdproc.slc2ifg.ifgram_list --slc ./slc --mode select \
     --select-weight-source model --select-min-degree 2 \
     --select-report report.json
 ```
@@ -244,8 +253,10 @@ python mintpy.stdproc.ifgram_list --slc ./slc --mode select \
   (e.g. `filt_mli.phsig.coh.tif` produced by a pilot run); missing
   rasters fall back to weight 0 (or to the model in `mixed` mode).
 * `coherence` without `coh_dir` — on-the-fly quick coherence from the
-  SLC directory (block-average downsample, complex correlation, Touzi
-  debias, robust statistic).
+  SLC directory: with `slc2ifg.bbox` set, only the AOI window of each SLC
+  is read (block-mean downsampled by `quick_nlks`, default 1); otherwise a
+  whole-scene grid sample is used. Complex correlation + Touzi debias +
+  robust statistic either way.
 * `mixed` — measured where available, `model` fills gaps.
 
 ## 5. Practical recommendations

@@ -209,8 +209,14 @@ class BasicExecutor(Slc2ifgExecutor):
         return ['ifgram_list', 'generate_ifgram', 'stitch',
                 'multilook', 'filter', 'unwrap']
 
-    def _run_ifgram_list(self, slc_dir: Path, out_dir: Path) -> Path:
-        """Eagerly generate the pair list (chain topology depends on it)."""
+    def _run_ifgram_list(self, slc_dir: Path, out_dir: Path,
+                         bbox_cfg: Optional[Tuple[str, float]] = None) -> Path:
+        """Eagerly generate the pair list (chain topology depends on it).
+
+        ``bbox_cfg`` is the read-time-crop AOI ``(wsen_str, buffer)``: in
+        select mode it restricts the quick-coherence screening to the AOI
+        window instead of reading the whole SLC (the AOI is already cropped).
+        """
         from mintpy.stdproc.ifgram_list import (
             filter_date_list,
             generate_pairs,
@@ -259,6 +265,8 @@ class BasicExecutor(Slc2ifgExecutor):
                     ('coh_stat', 'str'),
                     ('coh_usable_threshold', 'float'),
                     ('quick_window', 'int'),
+                    ('quick_nlks', 'int'),
+                    ('quick_max_pixels', 'int'),
                     ('quick_grid', 'int'),
                     ('quick_block', 'int'),
                     ('quick_max_workers', 'int'),
@@ -282,6 +290,14 @@ class BasicExecutor(Slc2ifgExecutor):
                    or self._opt('slc2ifg.ifgram_list.select.slc_pattern'))
             if pat:
                 params['slc_pattern'] = pat
+            # AOI: restrict the quick coherence to the bbox+buffer window
+            # (only when the SLCs are NOT already cropped on disk, i.e. when
+            # the read-time crop is active and bbox_cfg is set).
+            if bbox_cfg:
+                from mintpy.stdproc.crop_slc_geo import parse_wsen
+                wsen, buffer = bbox_cfg
+                params['bbox'] = parse_wsen(wsen)
+                params['bbox_buffer'] = float(buffer)
             # report / dot: resolve relative paths against the work dir
             # (mirrors the engine's _select_params)
             for out_key, cfgk in (
@@ -379,7 +395,7 @@ class BasicExecutor(Slc2ifgExecutor):
             b_slc = slc_base / b if b else slc_base
             b_out = ifg_out / b if b else ifg_out
             b_out.mkdir(parents=True, exist_ok=True)
-            pair_file = self._run_ifgram_list(b_slc, b_out)
+            pair_file = self._run_ifgram_list(b_slc, b_out, bbox_cfg)
             pair_files[btag] = pair_file
             pairs = _read_pairs(pair_file)
             if not pairs:

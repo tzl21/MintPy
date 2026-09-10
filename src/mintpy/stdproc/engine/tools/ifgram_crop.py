@@ -60,6 +60,8 @@ class IfgramListTool(Tool):
             ('coh_stat', 'str'),
             ('coh_usable_threshold', 'float'),
             ('quick_window', 'int'),
+            ('quick_nlks', 'int'),
+            ('quick_max_pixels', 'int'),
             ('quick_max_workers', 'int'),
             ('quick_debias', 'bool'),
             ('min_degree', 'int'),
@@ -69,6 +71,12 @@ class IfgramListTool(Tool):
             ('verify', 'bool'),
         ]
     ] + [
+        # unified pipeline AOI (not a select.* key): quick coherence reads
+        # only the bbox+buffer window of each SLC instead of the whole scene
+        ParamSpec('bbox', cfg='slc2ifg.bbox',
+                  legacy_cfg='slc2ifg.crop_slc.wsen'),
+        ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer', kind='float',
+                  legacy_cfg='slc2ifg.crop_slc.buffer'),
         # config keys are select.report / select.dot, param names report_file/dot_file
         ParamSpec('report_file', cfg='slc2ifg.ifgram_list.select.report'),
         ParamSpec('dot_file', cfg='slc2ifg.ifgram_list.select.dot'),

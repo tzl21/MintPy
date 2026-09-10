@@ -305,6 +305,14 @@ def create_parser():
     input_group = parser.add_argument_group('Input directories')
     input_group.add_argument('--slc', dest='slc_dir', default='merged/SLC',
                            help='Directory containing merged SLCs (default: merged/SLC)')
+    input_group.add_argument('--bbox', type=float, nargs=4,
+                           metavar=('W', 'S', 'E', 'N'), default=None,
+                           help='WSEN AOI bbox (EPSG:4326, degrees); in select mode '
+                                'the quick coherence reads only this window of the '
+                                'SLCs instead of the whole scene (default: None)')
+    input_group.add_argument('--bbox-buffer', dest='bbox_buffer', type=float,
+                           default=None,
+                           help='Buffer in degrees around --bbox (default: 0.0)')
     input_group.add_argument('-w', '--work-dir', dest='work_dir', default='./',
                            help='Working directory (default: current directory)')
 
@@ -379,6 +387,10 @@ def create_parser():
     select_group.add_argument('--select-quick-window', dest='select_quick_window',
                              type=int, default=None,
                              help='Coherence window for quick coherence (default: 5)')
+    select_group.add_argument('--select-quick-nlks', dest='select_quick_nlks',
+                             type=int, default=None,
+                             help='Block-mean downsampling factor of the --bbox window '
+                                  'for quick coherence (default: 1 = full resolution)')
     select_group.add_argument('--select-quick-debias', dest='select_quick_debias',
                              type=_str2bool, metavar='{true,false}', default=None,
                              help='Touzi bias correction for quick coherence (default: true)')
@@ -674,6 +686,7 @@ def _select_params_from_args(args):
         ('select_coh_stat', 'coh_stat'),
         ('select_coh_usable_threshold', 'coh_usable_threshold'),
         ('select_quick_window', 'quick_window'),
+        ('select_quick_nlks', 'quick_nlks'),
         ('select_quick_max_workers', 'quick_max_workers'),
         ('select_model_tau_days', 'model_tau_days'),
         ('select_model_gamma0', 'model_gamma0'),
@@ -687,6 +700,10 @@ def _select_params_from_args(args):
         val = getattr(args, cli_name, None)
         if val is not None:
             params[param_name] = val
+    # AOI: restrict the quick coherence to the bbox+buffer window
+    if getattr(args, 'bbox', None) is not None:
+        params['bbox'] = tuple(float(v) for v in args.bbox)
+        params['bbox_buffer'] = float(getattr(args, 'bbox_buffer', None) or 0.0)
     if args.select_report:
         params['report_file'] = os.path.join(args.work_dir, args.select_report) \
             if not os.path.isabs(args.select_report) else args.select_report

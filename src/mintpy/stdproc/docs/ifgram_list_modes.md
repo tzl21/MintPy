@@ -177,7 +177,7 @@ Every candidate gets a scalar quality `w` (larger = better):
 |---|---|---|
 | `model` (default) | `w = γ0 · exp(−Δt/τ)` (+ optional perp factor) | date list only |
 | `coherence` + `coh_dir` | statistic of an existing coherence raster | a pilot run's products |
-| `coherence` (no `coh_dir`) | complex coherence on **downsampled** SLCs | SLC directory |
+| `coherence` (no `coh_dir`) | complex coherence on the **AOI window** of the SLCs (or a whole-scene grid sample) | SLC directory |
 | `mixed` | measured where available, `model` fills gaps | SLCs or rasters + model |
 
 **`model` details** — `model_tau_days` (default **90**) is the
@@ -195,17 +195,23 @@ coherent; that requires the measured sources.
 A missing raster yields weight 0 in `coherence` mode, or a model
 fallback in `mixed` mode (warned in the log).
 
-**`coherence` quick (on-the-fly) details** — the "screening" source:
-each SLC is read as a regular `quick_grid`×`quick_grid` grid of
-`quick_block`×`quick_block` sample windows (0.04% of the pixels, no
-whole-image read), the complex correlation magnitude is computed
-with a `quick_window`×`quick_window` boxcar (default 5), corrected for
-the magnitude bias (`quick_debias`, default on; Touzi 1999 with
+**`coherence` quick (on-the-fly) details** — the "screening" source.
+With `slc2ifg.bbox` (+ `slc2ifg.bbox_buffer`) set, only that window of each
+SLC is read (`crop_slc_geo.bbox_to_window`), block-averaged by `quick_nlks`
+(default **1** = full window resolution: the AOI is already cropped, so
+downsampling it further buys little); `quick_max_pixels` (default
+1048576) caps the window and raises the factor automatically for very
+large AOIs. Without a bbox, each SLC is read as a regular
+`quick_grid`×`quick_grid` grid of `quick_block`×`quick_block` sample
+windows (0.04% of the pixels, no whole-image read) instead.
+Either way the complex correlation magnitude is computed with a
+`quick_window`×`quick_window` boxcar (default 5), corrected for the
+magnitude bias (`quick_debias`, default on; Touzi 1999 with
 `L = (factor·window)²` effective looks:
 `γ ≈ (γ̂ − 1/(2L)) / (1 − 1/(2L))`), and aggregated to one scalar. Cost:
 milliseconds per pair — cheap enough to screen *all* candidates;
 `quick_max_workers > 1` parallelises the per-pair screening with a
-thread pool (the downsampled SLCs are loaded once up front).
+thread pool (the sampled SLCs are loaded once up front).
 
 **Aggregation statistic** (`coh_stat` / `quick_stat`, default `mean`):
 
@@ -327,7 +333,8 @@ window-pair rule.)
 | `coh_dir` / `coh_kind` / `coh_variant` | — / `phsig` / `filt_mli` | existing-coherence source. |
 | `coh_stat` / `coh_usable_threshold` | `mean` / `0.3` | raster aggregation. |
 | `quick_window` / `quick_debias` | `5` / `true` | on-the-fly coherence boxcar / Touzi bias correction. |
-| `quick_grid` / `quick_block` | `12` / `16` | on-the-fly grid sampling density. |
+| `quick_nlks` / `quick_max_pixels` | `1` / `1048576` | block-mean downsampling of the `slc2ifg.bbox` window + size cap (bbox path). |
+| `quick_grid` / `quick_block` | `12` / `16` | whole-scene grid sampling density (no-bbox path). |
 | `quick_max_workers` | `1` | threads for the per-pair quick-coherence screening. |
 | `quick_stat` / `quick_usable_threshold` | `mean` / `0.3` | quick aggregation. |
 | `min_degree` | `2` | minimum interferograms per date (0/1 = spanning tree only). |
