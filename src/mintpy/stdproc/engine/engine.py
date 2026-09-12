@@ -692,6 +692,7 @@ class Engine:
                 ('perp_baseline_max', 'float'),
                 ('perp_baseline_file', 'str'),
                 ('weight_source', 'str'),
+                ('slc_pattern', 'str'),
                 ('model_tau_days', 'float'),
                 ('model_gamma0', 'float'),
                 ('coh_dir', 'str'),

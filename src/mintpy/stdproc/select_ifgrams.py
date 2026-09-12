@@ -864,8 +864,9 @@ def quick_coherence_weights(
         (d for d in dates
          if find_slc_file_by_date(slc_dirs, d, pattern) is not None), None)
     if first is None:
-        logger.warning("no SLC files found under %s (pattern %s)",
-                       slc_dir, pattern)
+        logger.warning(
+            "quick coherence: no SLC found under %s with pattern '%s' — "
+            "check slc2ifg.slc_input / slc2ifg.slc_pattern", slc_dir, pattern)
         return {(a, b): None for a, b in pairs}
     f0 = find_slc_file_by_date(slc_dirs, first, pattern)
 
@@ -1368,6 +1369,19 @@ def select_pairs(
                 "weight_source='coherence'/'mixed' requires either "
                 "select.coh_dir (existing coherence rasters) or an SLC "
                 "directory (on-the-fly quick coherence)")
+
+    if source == 'coherence' and not any(
+            v is not None for v in (measured_w or {}).values()):
+        # every candidate would get weight 0.0, which makes the augmentation
+        # "not below the running mean" trivially true and silently selects the
+        # complete candidate graph — fail loudly instead.
+        raise ValueError(
+            "weight_source='coherence' but no coherence could be measured for "
+            "any candidate pair — check slc2ifg.slc_pattern / slc2ifg.slc_input "
+            "(on-the-fly quick coherence) or select.coh_dir (+ coh_pattern) "
+            "for existing rasters; also check that slc2ifg.bbox overlaps the "
+            "SLCs, and that select.quick_usable_threshold is not rejecting "
+            "every pair")
 
     if source == 'model':
         weights: Dict[Tuple[str, str], float] = dict(model_w)

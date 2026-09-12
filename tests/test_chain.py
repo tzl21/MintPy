@@ -843,6 +843,52 @@ def test_entry_ifgram_list_replans_pairs():
     assert '20220105-20220117' in txt
 
 
+def test_entry_select_forwards_slc_pattern():
+    """select-mode quick coherence must receive the configured slc_pattern.
+
+    Regression: 'slc_pattern' was missing from the engine's select-parameter
+    list, so the on-the-fly coherence screener kept the processor default
+    (``*.slc.*``) and found no SLC in an OPERA ``<date>/tXXX_....h5`` layout.
+    """
+    import tempfile
+
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
+
+    tmp = Path(tempfile.mkdtemp())
+    slc = tmp / 'slcs'
+    for d in ('20220105', '20220117'):
+        (slc / d).mkdir(parents=True)
+        (slc / d / f't124_264305_iw2_{d}.h5').touch()
+    cfg = tmp / 'mini.cfg'
+    cfg.write_text(
+        f'slc2ifg.work_dir = {tmp}\n'
+        f'slc2ifg.slc_input = {slc}\n'
+        'slc2ifg.processor = isce3\n'
+        'slc2ifg.slc_pattern = **/t*.h5\n'
+        'slc2ifg.ifgram_list.mode = select\n'
+        'slc2ifg.ifgram_list.select.weight_source = coherence\n'
+        'engine.stages = ifgram_list,complex_coh\n'
+        'engine.gpu = false\n')
+    eng = Engine(load_engine_config(str(cfg)))
+    p = eng._select_params(eng.config.raw)
+    assert p['slc_pattern'] == '**/t*.h5'
+    assert p['weight_source'] == 'coherence'
+
+    # legacy select.slc_pattern is still honoured when the unified key is 'auto'
+    cfg2 = tmp / 'legacy.cfg'
+    cfg2.write_text(
+        f'slc2ifg.work_dir = {tmp}\n'
+        f'slc2ifg.slc_input = {slc}\n'
+        'slc2ifg.slc_pattern = auto\n'
+        'slc2ifg.ifgram_list.mode = select\n'
+        'slc2ifg.ifgram_list.select.slc_pattern = *.h5\n'
+        'engine.stages = ifgram_list,complex_coh\n'
+        'engine.gpu = false\n')
+    eng2 = Engine(load_engine_config(str(cfg2)))
+    assert eng2._select_params(eng2.config.raw)['slc_pattern'] == '*.h5'
+
+
 def test_entry_ifgram_list_without_slcs_keeps_tree():
     """ifgram_list listed, but no SLCs: warn and keep the existing pair list."""
     import tempfile
