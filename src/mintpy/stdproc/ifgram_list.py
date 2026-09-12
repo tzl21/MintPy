@@ -32,6 +32,10 @@ DEFAULT_MODE = 'sequential'
 # Date pattern to match YYYYMMDD format
 DATE_PATTERN = re.compile(r'(\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])')
 
+# Date pair line: YYYYMMDD<sep>YYYYMMDD (sep: - _ , ; : or whitespace); any
+# trailing columns / '#' comment are ignored (e.g. '20240107-20240119  100.5')
+PAIR_LINE_PATTERN = re.compile(r'^\s*(\d{8})\s*[-_,;:\s]\s*(\d{8})\b')
+
 # Pair generation modes
 PAIR_GENERATORS = {}
 
@@ -256,6 +260,39 @@ def generate_select_pairs(date_list, num_connections=None, oneyear_range=None,
     return pairs
 
 
+@register_pair_generator('file')
+def generate_file_pairs(date_list, num_connections=None, oneyear_range=None,
+                        select_params=None):
+    """
+    Explicit interferogram pair list read from a file (mode='file').
+
+    The file is used **verbatim** — ``num_connections``, ``annual_windows``
+    and the date filters do not apply.  Every referenced date must exist in
+    ``date_list`` (i.e. have an SLC): a pair without input data cannot be
+    produced, so a missing date raises instead of being dropped silently.
+
+    Parameters:
+        date_list: List of dates in YYYYMMDD format (the SLC dates)
+        num_connections: Ignored
+        oneyear_range: Ignored
+        select_params: dict carrying 'pair_file' (required)
+
+    Returns:
+        Sorted list of (date1, date2) pairs
+    """
+    params = dict(select_params or {})
+    pair_file = params.get('pair_file')
+    if not pair_file:
+        raise ValueError(
+            "ifgram_list mode='file' requires slc2ifg.ifgram_list.pair_file "
+            "(a text file with one 'YYYYMMDD-YYYYMMDD' pair per line)")
+    pairs = read_pair_list(pair_file)
+    check_pair_dates(pairs, date_list, source=str(pair_file))
+    logger.info("file mode: %d pair(s) used verbatim from %s",
+                len(pairs), pair_file)
+    return pairs
+
+
 #########################################################################
 def _str2bool(value):
     """argparse type: parse 'true'/'false'/'1'/'0'/'yes'/'no' into a bool."""
@@ -331,7 +368,13 @@ def create_parser():
                                   f'  sequential  k-NN (set with -n)\n'
                                   f'  reference   star network around the earliest date\n'
                                   f'  select      coherence-aware selection (--select-*)\n'
+                                  f'  file        explicit pair list (--pair-file, used verbatim)\n'
                                   f'Details: docs/ifgram_list_modes.md')
+    network_group.add_argument('--pair-file', type=str, dest='pair_file', default=None,
+                             help="Explicit pair list for --mode file: one "
+                                  "'YYYYMMDD-YYYYMMDD' pair per line (blank "
+                                  "lines and '#' comments allowed); used "
+                                  "verbatim, replaces -n / --select-*")
     network_group.add_argument('--oneyear-interferograms', type=int, dest='oneyear_interferograms',
                              help='Days range for one-year interferograms')
     network_group.add_argument('--start-date', type=str, dest='start_date', default=None,
@@ -671,6 +714,54 @@ def write_pair_list(pairs, output_file):
     return output_file
 
 
+def read_pair_list(pair_file):
+    """Read an explicit interferogram pair list (one pair per line).
+
+    Accepted per line (a trailing ``# comment`` and any extra columns are
+    ignored): ``YYYYMMDD-YYYYMMDD``, ``YYYYMMDD_YYYYMMDD`` or
+    ``YYYYMMDD YYYYMMDD``.  Blank lines and ``#`` comments are skipped;
+    duplicates are removed, the dates of every pair are ordered and the
+    result is sorted.  Raises ValueError on an unparsable line or an empty
+    file.
+    """
+    if not os.path.isfile(pair_file):
+        raise ValueError(f"pair file not found: {pair_file}")
+    pairs, seen = [], set()
+    with open(pair_file, 'r', encoding='utf-8-sig') as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            m = PAIR_LINE_PATTERN.match(line)
+            if m is None:
+                raise ValueError(
+                    f"{pair_file}:{lineno}: cannot parse {raw.strip()!r} — "
+                    f"expected 'YYYYMMDD-YYYYMMDD' (one pair per line)")
+            d1, d2 = m.group(1), m.group(2)
+            if d1 == d2:
+                raise ValueError(
+                    f"{pair_file}:{lineno}: identical dates {d1}")
+            key = (d1, d2) if d1 < d2 else (d2, d1)
+            if key not in seen:
+                seen.add(key)
+                pairs.append(key)
+    if not pairs:
+        raise ValueError(f"no interferogram pairs found in {pair_file}")
+    return sorted(pairs)
+
+
+def check_pair_dates(pairs, date_list, source='pair list'):
+    """Raise ValueError when a pair references a date absent from date_list."""
+    known = set(date_list or [])
+    missing = sorted({d for a, b in pairs for d in (a, b)} - known)
+    if missing:
+        shown = ', '.join(missing[:8]) + (' ...' if len(missing) > 8 else '')
+        raise ValueError(
+            f"{source}: {len(missing)} date(s) have no SLC in the input "
+            f"directory ({shown}) — trim the pair file or add the missing "
+            f"SLCs")
+
+
 def _select_params_from_args(args):
     """Build the select-mode parameter dict from CLI arguments."""
     params = {}
@@ -743,14 +834,18 @@ def main(args=None):
                 params=params)
         else:
             # Generate pairs
+            select_params = {}
+            if getattr(args, 'select_annual_windows', None):
+                select_params['annual_windows'] = args.select_annual_windows
+            if getattr(args, 'pair_file', None):
+                select_params['pair_file'] = args.pair_file
             pairs = generate_pairs(
                 date_list=date_list,
                 mode=args.mode,
                 num_connections=args.num_connections
                 if args.num_connections is not None else DEFAULT_NUM_CONNECTIONS,
                 oneyear_range=args.oneyear_interferograms,
-                select_params={'annual_windows': args.select_annual_windows}
-                if getattr(args, 'select_annual_windows', None) else None,
+                select_params=select_params or None,
             )
         
         # Write pair list
