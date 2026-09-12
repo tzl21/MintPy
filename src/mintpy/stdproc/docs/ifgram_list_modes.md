@@ -4,7 +4,7 @@ This document explains, mode by mode, how `ifgram_list` turns the
 acquisition-date list into the interferogram pair list that drives the
 whole pipeline (interferogram generation → unwrapping → SBAS inversion).
 
-Three modes exist, selected by `slc2ifg.ifgram_list.mode`
+Four modes exist, selected by `slc2ifg.ifgram_list.mode`
 (or `--mode` in the standalone CLI):
 
 | mode | name | edges | quality-aware | long baselines | when to use |
@@ -12,6 +12,7 @@ Three modes exist, selected by `slc2ifg.ifgram_list.mode`
 | `sequential` | k temporal nearest neighbours | ≈ k·N | no | only via `annual_windows` (one-year = `365:<range>`) | simple, dense short-baseline network |
 | `reference` | star network (single master) | N−1 | no | long for late dates | tiny stacks / stable targets / pilot runs |
 | `select` | coherence-aware connected selection | tunable (default ≈ 1.5·N) | **yes** | yes (annual windows) | the recommended default for production SBAS |
+| `file` | explicit pair list from `ifgram_list.pair_file` | exactly the file | n/a | exactly the file | reproduce a curated network (earlier run, ISCE2, colleague) verbatim |
 
 The theory behind `select` (why connectivity is the only hard constraint,
 why coherence is the right objective) is in
@@ -363,7 +364,57 @@ window-pair rule.)
 
 ---
 
-## 4. Choosing a mode — decision guide
+## 4. `file` — explicit pair list
+
+### 4.1 Algorithm
+
+Nothing is generated: the pairs are read from
+`slc2ifg.ifgram_list.pair_file` and used **verbatim**. Every other network
+knob — `num_connections`, `annual_windows`, `select.*`, `start_date` /
+`end_date` / `exclude_date` — is ignored: the file *is* the network.
+
+```
+# pairs.txt — the same format every other mode writes out
+20240107-20240119
+20240107-20240131   # trailing comment is fine
+20240119 20240131   # space-separated also works
+```
+
+Each pair's dates are ordered, duplicates are dropped and the result is
+sorted.  Unparsable lines (or an empty file) raise.
+
+### 4.2 Properties
+
+* Instant and deterministic — no candidate generation, no coherence read.
+* Every referenced date must have an SLC in `slc2ifg.slc_input`.  A missing
+  date raises with the list of offending dates, because a pair without input
+  data cannot be produced.
+* Connectivity / full SBAS rank is **not** checked: you own the network.  Use
+  `select_ifgrams.verify_selection()` if you need the guarantee.
+* The list is copied to `<generate_ifgram.output_dir>/ifgram_list.txt`, so the
+  rest of the pipeline and the manifest keep their canonical artifact.
+
+### 4.3 Parameters
+
+| key | meaning |
+|---|---|
+| `slc2ifg.ifgram_list.mode = file` | select this mode; setting `pair_file` without it also switches to it (logged with an INFO message) |
+| `slc2ifg.ifgram_list.pair_file = <path>` | the pair list; a relative path resolves against `slc2ifg.work_dir` |
+
+Standalone CLI:
+`ifgram_list.py --slc <slc_dir> --mode file --pair-file pairs.txt -o <outdir>`
+
+### 4.4 When to use
+
+* you already have a curated network (an earlier run, ISCE2
+  `stackSentinel`, a colleague's list) and want *exactly* it;
+* you want to (re-)generate interferograms for a known pair set without
+  paying for selection again;
+* you script a sweep in which the network must stay fixed.
+
+---
+
+## 5. Choosing a mode — decision guide
 
 | situation | recommendation |
 |---|---|
@@ -373,3 +424,4 @@ window-pair rule.)
 | reuse a previous run's coherence | `select`, `weight_source = coherence`, `coh_dir = <previous ifgrams>` |
 | strict compute budget (unwrap time) | `select` + `max_pairs` |
 | exactly reproduce an old k-NN network | `sequential` |
+| exactly reproduce a curated/old pair list | `file` + `pair_file = <list.txt>` |

@@ -168,9 +168,16 @@ class Engine:
                     "containing SLC files matching slc2ifg.slc_pattern, or "
                     "drop complex_coh")
             # Pair planning is explicit when the user lists 'ifgram_list' in
-            # engine.stages: its output then defines the pairs (mode /
-            # select.* / date filters) even though it is not a DAG node.
-            plan_pairs = 'ifgram_list' in chain_names
+            # engine.stages, or hands in a pair list
+            # (slc2ifg.ifgram_list.pair_file): its output then defines the
+            # pairs (mode / select.* / date filters / verbatim file) even
+            # though it is not a DAG node — an explicit pair list is never
+            # silently overridden by the product tree.
+            from mintpy.stdproc.engine.config import get_opt
+            plan_pairs = (
+                'ifgram_list' in chain_names
+                or bool(get_opt(self.config.raw,
+                                'slc2ifg.ifgram_list.pair_file')))
             # Drop the upstream infrastructure stages (SLC crop / pair
             # planning / stitching) — the input products already exist on
             # disk.  complex_coh (per_burst) is kept: in entry mode it
@@ -319,9 +326,10 @@ class Engine:
 
         The date pairs come from, in order of precedence:
 
-        1. **``ifgram_list`` in engine.stages** — pair planning is explicit, so
-           it is re-run from the SLC acquisition dates and its output defines
-           the pairs (``mode`` / ``select.*`` / date filters are honoured),
+        1. **``ifgram_list`` in engine.stages** (or an explicit
+           ``ifgram_list.pair_file``) — pair planning is explicit, so it is
+           re-run from the SLC acquisition dates and its output defines the
+           pairs (``mode`` / ``select.*`` / date filters are honoured),
            even though it is not a DAG node.
         2. **the product tree** — ``input_dir/ifgram_list.txt`` or the
            ``input_dir/{date1}_{date2}/`` directories.  The entry stages then
@@ -629,12 +637,40 @@ class Engine:
         end_date = get_opt(cfg, 'slc2ifg.ifgram_list.end_date')
         exclude_date = get_opt(cfg, 'slc2ifg.ifgram_list.exclude_date')
 
-        dates = get_date_list(str(slc_dir))
-        dates = filter_date_list(dates, start_date=start_date, end_date=end_date,
-                                 exclude_date=exclude_date)
+        # An explicit pair file always wins, so that setting it is never
+        # silently ignored (mode='file' is the documented way).
+        pair_file_cfg = get_opt(cfg, 'slc2ifg.ifgram_list.pair_file')
+        if pair_file_cfg:
+            if mode != 'file':
+                logger.info(
+                    "ifgram_list: slc2ifg.ifgram_list.pair_file is set — using "
+                    "it instead of mode=%s (set "
+                    "slc2ifg.ifgram_list.mode = file to make this explicit); "
+                    "select.* / num_connections do not apply", mode)
+            mode = 'file'
+        elif mode == 'file':
+            raise ValueError(
+                "ifgram_list mode=file requires slc2ifg.ifgram_list.pair_file "
+                "(a text file with one 'YYYYMMDD-YYYYMMDD' pair per line)")
+
+        all_dates = get_date_list(str(slc_dir))
+        dates = filter_date_list(all_dates, start_date=start_date,
+                                 end_date=end_date, exclude_date=exclude_date)
         pair_file = out_dir / 'ifgram_list.txt'
 
-        if mode == 'select':
+        if mode == 'file':
+            # Explicit pair list, used verbatim: no date filtering, no
+            # candidate generation.  Every referenced date must have an SLC.
+            path = Path(pair_file_cfg)
+            if not path.is_absolute():
+                path = (self.config.work_dir / path).resolve()
+            if start_date or end_date or exclude_date:
+                logger.warning(
+                    "ifgram_list: start_date/end_date/exclude_date are ignored "
+                    "in mode=file — the pair file is used verbatim")
+            pairs = generate_pairs(all_dates, 'file', None,
+                                   select_params={'pair_file': str(path)})
+        elif mode == 'select':
             # Coherence-aware connected selection (see select_ifgrams.py).
             # Runs eagerly because the graph topology depends on it; the
             # selection guarantees connectivity, hence full SBAS rank.
