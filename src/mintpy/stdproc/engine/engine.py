@@ -167,6 +167,10 @@ class Engine:
                     "inputs — point slc2ifg.slc_input at a directory "
                     "containing SLC files matching slc2ifg.slc_pattern, or "
                     "drop complex_coh")
+            # Pair planning is explicit when the user lists 'ifgram_list' in
+            # engine.stages: its output then defines the pairs (mode /
+            # select.* / date filters) even though it is not a DAG node.
+            plan_pairs = 'ifgram_list' in chain_names
             # Drop the upstream infrastructure stages (SLC crop / pair
             # planning / stitching) — the input products already exist on
             # disk.  complex_coh (per_burst) is kept: in entry mode it
@@ -191,7 +195,7 @@ class Engine:
             logger.info("Processing chain: %s", ' -> '.join(chain_names))
 
         if entry_mode:
-            return self._build_entry_graph(g, chain)
+            return self._build_entry_graph(g, chain, plan_pairs=plan_pairs)
 
         # --- optional crop step: transforms the input SLC directory ---
         slc_base = self.slc_input
@@ -309,16 +313,21 @@ class Engine:
     # ------------------------------------------------------------------
     # Mid-chain entry (start from an arbitrary stage's products)
     # ------------------------------------------------------------------
-    def _build_entry_graph(self, g: TaskGraph, chain) -> TaskGraph:
+    def _build_entry_graph(self, g: TaskGraph, chain,
+                           plan_pairs: bool = False) -> TaskGraph:
         """Build the DAG for mid-chain entry mode (inputs are existing products).
 
         The date pairs come from, in order of precedence:
 
-        1. **the product tree** — ``input_dir/ifgram_list.txt`` or the
+        1. **``ifgram_list`` in engine.stages** — pair planning is explicit, so
+           it is re-run from the SLC acquisition dates and its output defines
+           the pairs (``mode`` / ``select.*`` / date filters are honoured),
+           even though it is not a DAG node.
+        2. **the product tree** — ``input_dir/ifgram_list.txt`` or the
            ``input_dir/{date1}_{date2}/`` directories.  The entry stages then
            consume ``{input_variant}.int[.tif]`` per pair, so the first stage
            depends only on files already on disk.
-        2. **the SLC dates** — only for a ``complex_coh``-only chain whose
+        3. **the SLC dates** — only for a ``complex_coh``-only chain whose
            product tree is empty/absent: the coherence is computed directly
            from the SLCs, so the pair list is generated from the SLC
            acquisition dates (``ifgram_list``), exactly as in the standard
@@ -327,35 +336,57 @@ class Engine:
         chain_names = [s.name for s in chain]
         variant = self._entry_variant()
         slc_only = all(name == 'complex_coh' for name in chain_names)
-
-        # 1) product tree first: an existing {root}/{date1}_{date2}/ tree (or
-        #    an ifgram_list.txt) defines the pairs to process.
         input_root = self._entry_input_root()
-        pair_file = self._find_input_pairs(input_root)
-        pairs = self._read_pairs(pair_file) if pair_file else \
-            self._pairs_from_dirs(input_root)
-
-        # 2) no product tree: for a complex_coh-only chain fall back to the
-        #    SLC acquisition dates, since the coherence is computed from the
-        #    SLCs and there is nothing else to take the pairs from.
+        pair_file = None
+        pairs: List[Tuple[str, str]] = []
         slc_pairs = False
+
+        # 1) explicit pair planning ('ifgram_list' in engine.stages) wins over
+        #    whatever pair list may be left over in the product tree.
+        if plan_pairs and self._entry_slcs_available():
+            pair_file = self._plan_entry_pairs()
+            pairs = self._read_pairs(pair_file)
+            if not pairs:
+                raise ValueError(
+                    f"engine: 'ifgram_list' (engine.stages) selected no pairs "
+                    f"from the SLC directory {self.slc_input} — check "
+                    f"slc2ifg.ifgram_list.*, slc2ifg.slc_pattern and the date "
+                    f"filters")
+        elif plan_pairs:
+            logger.warning(
+                "engine: engine.stages lists 'ifgram_list' but slc_input=%s "
+                "has no SLC matching slc2ifg.slc_pattern — keeping the "
+                "existing pair list under input_dir=%s", self.slc_input,
+                input_root)
+
+        # 2) product tree: an existing {root}/{date1}_{date2}/ tree (or an
+        #    ifgram_list.txt) defines the pairs to process.
         if not pairs:
-            if not slc_only:
+            pair_file = self._find_input_pairs(input_root)
+            pairs = self._read_pairs(pair_file) if pair_file else \
+                self._pairs_from_dirs(input_root)
+            if pairs:
+                logger.info("Mid-chain entry: using the existing pair list "
+                            "under input_dir=%s (add 'ifgram_list' to "
+                            "engine.stages to re-plan the pairs)", input_root)
+            # 3) no product tree: for a complex_coh-only chain fall back to
+            #    the SLC acquisition dates, since the coherence is computed
+            #    from the SLCs and there is nothing else to take them from.
+            elif slc_only and self._entry_slcs_available():
+                pair_file = self._plan_entry_pairs()
+                pairs = self._read_pairs(pair_file)
+                if not pairs:
+                    raise ValueError(
+                        f"engine: no date pairs found in the SLC directory "
+                        f"{self.slc_input} (check slc2ifg.slc_pattern / the "
+                        f"ifgram_list date filters)")
+                input_root = self.ifgram_dir
+                slc_pairs = True
+            else:
                 raise ValueError(
                     f"engine: no date pairs found under input_dir={input_root} "
                     f"(expected {input_root}/{{date1}}_{{date2}}/ directories "
                     f"or an ifgram_list.txt)")
-            out_dir = self.ifgram_dir
-            out_dir.mkdir(parents=True, exist_ok=True)
-            pair_file = self._run_ifgram_list(self.slc_input, out_dir)
-            pairs = self._read_pairs(pair_file)
-            if not pairs:
-                raise ValueError(
-                    f"engine: no date pairs found in the SLC directory "
-                    f"{self.slc_input} (check slc2ifg.slc_pattern / the "
-                    f"ifgram_list date filters)")
-            input_root = out_dir
-            slc_pairs = True
 
         if slc_pairs:
             logger.info("Mid-chain entry (SLC-based complex coherence): "
@@ -373,6 +404,17 @@ class Engine:
             engine_tools=self.config.tools,
         )
         return g
+
+    def _plan_entry_pairs(self) -> Path:
+        """Run ``ifgram_list`` eagerly for mid-chain entry mode.
+
+        Writes ``ifgram_list.txt`` under the engine's ifgram root (the
+        canonical pair-list location) and returns its path, so the entry
+        stages consume exactly the planned pairs.
+        """
+        out_dir = self.ifgram_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return self._run_ifgram_list(self.slc_input, out_dir)
 
     def _entry_input_root(self) -> Path:
         """Input root for mid-chain entry; default = the unified ifgram tree."""
