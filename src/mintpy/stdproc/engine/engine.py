@@ -160,14 +160,13 @@ class Engine:
                     "engine: 'crop_slc' cannot run in mid-chain entry mode "
                     "(it transforms SLCs and requires generate_ifgram)")
             # complex_coh reads SLCs directly — allowed in entry mode when a
-            # usable (flat, single-burst) SLC directory is configured.
+            # usable SLC directory is configured (honours slc2ifg.slc_pattern).
             if 'complex_coh' in chain_names and not self._entry_slcs_available():
                 raise ValueError(
                     "engine: 'complex_coh' in mid-chain entry mode needs SLC "
-                    "inputs — point slc2ifg.slc_input at a flat (single-burst) "
-                    "directory containing "
-                    f"'{naming.slc_pattern(self.processor)}' files (e.g. the "
-                    "cropped SLC output), or drop complex_coh")
+                    "inputs — point slc2ifg.slc_input at a directory "
+                    "containing SLC files matching slc2ifg.slc_pattern, or "
+                    "drop complex_coh")
             # Drop the upstream infrastructure stages (SLC crop / pair
             # planning / stitching) — the input products already exist on
             # disk.  complex_coh (per_burst) is kept: in entry mode it
@@ -313,27 +312,57 @@ class Engine:
     def _build_entry_graph(self, g: TaskGraph, chain) -> TaskGraph:
         """Build the DAG for mid-chain entry mode (inputs are existing products).
 
-        The input root uses the engine's canonical ``{root}/{date1}_{date2}/``
-        tree; date pairs are discovered from ``ifgram_list.txt`` (when present)
-        or from the ``{date1}_{date2}`` subdirectories themselves.  The entry
-        stage consumes ``{input_variant}.int[.tif]`` per pair — there are no
-        upstream nodes, so the first stage in the chain depends only on files
-        already on disk.
-        """
-        input_root = self._entry_input_root()
-        variant = self._entry_variant()
+        The date pairs come from, in order of precedence:
 
+        1. **the product tree** — ``input_dir/ifgram_list.txt`` or the
+           ``input_dir/{date1}_{date2}/`` directories.  The entry stages then
+           consume ``{input_variant}.int[.tif]`` per pair, so the first stage
+           depends only on files already on disk.
+        2. **the SLC dates** — only for a ``complex_coh``-only chain whose
+           product tree is empty/absent: the coherence is computed directly
+           from the SLCs, so the pair list is generated from the SLC
+           acquisition dates (``ifgram_list``), exactly as in the standard
+           pipeline.
+        """
+        chain_names = [s.name for s in chain]
+        variant = self._entry_variant()
+        slc_only = all(name == 'complex_coh' for name in chain_names)
+
+        # 1) product tree first: an existing {root}/{date1}_{date2}/ tree (or
+        #    an ifgram_list.txt) defines the pairs to process.
+        input_root = self._entry_input_root()
         pair_file = self._find_input_pairs(input_root)
         pairs = self._read_pairs(pair_file) if pair_file else \
             self._pairs_from_dirs(input_root)
-        if not pairs:
-            raise ValueError(
-                f"engine: no date pairs found under input_dir={input_root} "
-                f"(expected {input_root}/{{date1}}_{{date2}}/ directories or "
-                f"an ifgram_list.txt)")
 
-        logger.info("Mid-chain entry: input_dir=%s, input_variant=%s, "
-                    "%d pair(s)", input_root, variant, len(pairs))
+        # 2) no product tree: for a complex_coh-only chain fall back to the
+        #    SLC acquisition dates, since the coherence is computed from the
+        #    SLCs and there is nothing else to take the pairs from.
+        slc_pairs = False
+        if not pairs:
+            if not slc_only:
+                raise ValueError(
+                    f"engine: no date pairs found under input_dir={input_root} "
+                    f"(expected {input_root}/{{date1}}_{{date2}}/ directories "
+                    f"or an ifgram_list.txt)")
+            out_dir = self.ifgram_dir
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pair_file = self._run_ifgram_list(self.slc_input, out_dir)
+            pairs = self._read_pairs(pair_file)
+            if not pairs:
+                raise ValueError(
+                    f"engine: no date pairs found in the SLC directory "
+                    f"{self.slc_input} (check slc2ifg.slc_pattern / the "
+                    f"ifgram_list date filters)")
+            input_root = out_dir
+            slc_pairs = True
+
+        if slc_pairs:
+            logger.info("Mid-chain entry (SLC-based complex coherence): "
+                        "slc_input=%s, %d pair(s)", self.slc_input, len(pairs))
+        else:
+            logger.info("Mid-chain entry: input_dir=%s, input_variant=%s, "
+                        "%d pair(s)", input_root, variant, len(pairs))
         self._add_uniform_nodes(g, input_root, pair_file, chain,
                                 entry_variant=variant, pairs=pairs)
         self._apply_gpu(g)
@@ -393,17 +422,22 @@ class Engine:
         return cupy_available()
 
     def _entry_slcs_available(self) -> bool:
-        """True when ``slc_input`` is usable for mid-chain-entry complex
-        coherence: a flat (single-burst) directory containing SLC files.
+        """True when ``slc_input`` holds SLC files usable by entry-mode
+        complex coherence.
 
-        The burst-subdirectory (multi-burst) layout is not supported for
-        entry-mode complex coherence because entry pairs are global and carry
-        no burst attribution.
+        Uses the *configured* ``slc2ifg.slc_pattern`` (falling back to the
+        processor default) and the same lookup as
+        :func:`generate_ifgram.find_slc_file_by_date` — the top level plus one
+        nested level (e.g. ``<date>/yyyymmdd.slc.tif`` or the OPERA GSLC
+        ``<date>/tXXX_..._yyyymmdd.h5`` layout).
         """
         d = Path(self.slc_input)
         if not d.is_dir():
             return False
-        return bool(list(d.glob(naming.slc_pattern(self.processor))))
+        from mintpy.stdproc.engine.config import get_opt
+        pattern = (get_opt(self.config.raw, 'slc2ifg.slc_pattern')
+                   or naming.slc_pattern(self.processor))
+        return bool(list(d.glob(pattern)) or list(d.glob(f"*/{pattern}")))
 
     def _auto_tile_size(self) -> Optional[int]:
         """Pick a tile size so the dominant per-tile GPU peak fits the budget.
