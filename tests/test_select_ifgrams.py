@@ -662,6 +662,28 @@ def test_select_pairs_needs_slc_for_measured(tmp_path):
         raise AssertionError('expected ValueError without coherence source')
 
 
+def test_select_pairs_coherence_without_measurable_weights(tmp_path):
+    """weight_source=coherence with nothing measurable -> hard error.
+
+    Regression: every candidate got weight 0.0, which made the
+    mean-augmentation "not below the running mean" test trivially true and
+    silently selected the *complete* candidate graph (30 dates -> 435 pairs).
+    """
+    dates = DATES[:3]
+    _install_fake_osgeo({})
+    try:
+        try:
+            select_pairs(dates, slc_dir=str(tmp_path),
+                         params={'weight_source': 'coherence'})
+        except ValueError as e:
+            assert 'coherence' in str(e)
+        else:
+            raise AssertionError(
+                'expected ValueError when no coherence is measurable')
+    finally:
+        _uninstall_fake_osgeo()
+
+
 def test_write_report_json(tmp_path):
     rep = {'n_dates': 3, 'pairs': [('20230105', '20230117')]}
     out = tmp_path / 'r.json'
