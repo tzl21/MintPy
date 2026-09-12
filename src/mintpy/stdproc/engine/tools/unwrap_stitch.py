@@ -62,9 +62,7 @@ class UnwrapTool(Tool):
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
         unw, cc = ctx.output('unw'), ctx.output('conncomp')
-        if self.output_ready([unw, cc]):
-            ctx.logger.info("skip unwrap: %s exists", unw.name)
-            ctx.skipped = True
+        if self.skip_ready_outputs(ctx, 'unwrap'):
             return {'unw': unw, 'conncomp': cc}
 
         algorithm = ctx.param('algorithm', 'snaphu')

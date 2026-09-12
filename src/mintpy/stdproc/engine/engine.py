@@ -1254,7 +1254,10 @@ class Engine:
         )
 
         base = {'processor': self.processor,
-                'max_workers': self.config.max_workers or (os.cpu_count() or 1)}
+                'max_workers': self.config.max_workers or (os.cpu_count() or 1),
+                # engine-level: recompute and overwrite every stage output
+                'no_skip_existing': get_bool_opt(
+                    cfg, 'engine.no_skip_existing', fallback=False)}
         if self.config.tile_size:
             base['tile_size'] = self.config.tile_size
 

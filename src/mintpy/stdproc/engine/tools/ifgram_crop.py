@@ -164,6 +164,11 @@ class CropSlcTool(Tool):
         ParamSpec('prefix', cfg='slc2ifg.crop_slc.prefix', default=''),
         ParamSpec('by_burst', cfg='slc2ifg.crop_slc.by_burst', kind='bool',
                   default=False),
+        # stage-specific alias; engine.no_skip_existing (injected globally)
+        # also turns this on
+        ParamSpec('crop_no_skip_existing',
+                  cfg='slc2ifg.crop_slc.no_skip_existing', kind='bool',
+                  default=False),
     ]
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
@@ -211,6 +216,9 @@ class CropSlcTool(Tool):
                 '--prefix', str(ctx.param('prefix', '')),
                 '--max-workers', str(workers),
             ]
+        if ctx.param('no_skip_existing', False) \
+                or ctx.param('crop_no_skip_existing', False):
+            args_list.append('--no-skip-existing')
         if ctx.param('geom_dir'):
             args_list += ['--geom-dir', str(ctx.param('geom_dir'))]
         if ctx.param('by_burst', False):
