@@ -759,6 +759,43 @@ def test_entry_complex_coh_from_slcs():
     assert n.ctx.inputs['slc_dir'] == Path(eng.slc_input)
 
 
+def test_entry_complex_coh_slc_pairs_fallback():
+    """complex_coh-only entry with no product tree: pairs from the SLC dates.
+
+    Regression: an operator CSLC layout (``<date>/tXXX_..._yyyymmdd.h5``)
+    plus a configured ``slc2ifg.slc_pattern`` must pass the entry-mode SLC
+    check and yield the SLC-derived pairs instead of failing with
+    "no date pairs found under input_dir".
+    """
+    import tempfile
+
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
+
+    tmp = Path(tempfile.mkdtemp())
+    slc = tmp / 'slcs'
+    for d in ('20220105', '20220117', '20220210'):
+        (slc / d).mkdir(parents=True)
+        (slc / d / f't124_264305_iw2_{d}.h5').touch()
+    cfg = tmp / 'mini.cfg'
+    cfg.write_text(
+        f'slc2ifg.work_dir = {tmp}\n'
+        f'slc2ifg.slc_input = {slc}\n'
+        'slc2ifg.processor = isce3\n'
+        'slc2ifg.slc_pattern = **/t*.h5\n'
+        'engine.stages = ifgram_list,complex_coh\n'   # no generate_ifgram -> entry
+        'engine.gpu = false\n')
+    eng = Engine(load_engine_config(str(cfg)))
+
+    assert eng._entry_slcs_available()          # honours the configured pattern
+    g = eng.plan(dry_run=True)
+    assert sorted(g.nodes) == [
+        'complex_coh#20220105_20220117',
+        'complex_coh#20220105_20220210',
+        'complex_coh#20220117_20220210',
+    ]
+
+
 def test_entry_complex_coh_feeds_unwrap():
     """Entry mode + SLCs + unwrap: unwrap consumes the complex coherence."""
     eng = _entry_engine_with_slcs(tools='complex_coh,unwrap')
