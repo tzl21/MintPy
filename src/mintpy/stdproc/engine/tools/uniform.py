@@ -69,9 +69,7 @@ class MultilookTool(Tool):
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
         out = ctx.output('ifg')
-        if self.output_ready([out]):
-            ctx.logger.info("skip multilook: %s exists", out.name)
-            ctx.skipped = True
+        if self.skip_ready_outputs(ctx, 'multilook'):
             return {'ifg': out}
 
         from mintpy.stdproc.multilook import multilook_tif
@@ -118,9 +116,7 @@ class FilterTool(Tool):
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
         out = ctx.output('ifg')
-        if self.output_ready([out]):
-            ctx.logger.info("skip filter: %s exists", out.name)
-            ctx.skipped = True
+        if self.skip_ready_outputs(ctx, 'filter'):
             return {'ifg': out}
 
         filter_type = ctx.param('filter_type', 'goldstein')
@@ -169,9 +165,7 @@ class PhsigCohTool(Tool):
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
         out = ctx.output('coh')
-        if self.output_ready([out]):
-            ctx.logger.info("skip phsig_coh: %s exists", out.name)
-            ctx.skipped = True
+        if self.skip_ready_outputs(ctx, 'phsig_coh'):
             return {'coh': out}
 
         from mintpy.stdproc.engine.gpu_kernels import cupy_available

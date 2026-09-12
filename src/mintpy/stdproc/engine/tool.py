@@ -283,13 +283,75 @@ class Tool(ABC):
         return True
 
     def skip_if_exists(self, ctx: ToolContext) -> Optional[Dict[str, Path]]:
-        """Return output mapping if every output already exists, else None."""
-        if self.output_ready(ctx.outputs.values()):
-            ctx.logger.info("All outputs exist, skipping: %s",
-                            ', '.join(Path(p).name for p in ctx.outputs.values()))
-            ctx.skipped = True
-            return dict(ctx.outputs)
-        return None
+        """Return output mapping if every output already exists, else None.
+
+        With ``engine.no_skip_existing = True`` the existing outputs are
+        removed and None is returned, so the tool recomputes them.
+        """
+        if not self.output_ready(ctx.outputs.values()):
+            return None
+        if self.no_skip_existing(ctx):
+            self.overwrite_outputs(ctx)
+            return None
+        ctx.logger.info("All outputs exist, skipping: %s",
+                        ', '.join(Path(p).name for p in ctx.outputs.values()))
+        ctx.skipped = True
+        return dict(ctx.outputs)
+
+    def no_skip_existing(self, ctx: ToolContext) -> bool:
+        """True when ``engine.no_skip_existing`` asks for a full recompute.
+
+        Injected into every tool's params by ``Engine._tool_params``;
+        False (the default) keeps the idempotent resume behaviour.
+        """
+        return bool(ctx.param('no_skip_existing', False))
+
+    def overwrite_outputs(self, ctx: ToolContext, paths=None) -> None:
+        """Remove ready output *files* so the tool recomputes them.
+
+        Directory outputs (the generate_ifgram ``pair_dir``, the crop_slc
+        output tree) are kept: they are containers that may hold products of
+        other stages, and every stage rewrites its own file in place.
+        """
+        targets = list(ctx.outputs.values() if paths is None else paths)
+        removed, kept_dirs = [], []
+        for p in targets:
+            p = Path(p)
+            if p.is_dir() and not p.is_symlink():
+                kept_dirs.append(p)
+                continue
+            if p.exists():
+                try:
+                    p.unlink()
+                    removed.append(p)
+                except OSError as exc:
+                    ctx.logger.warning(
+                        "no_skip_existing: cannot remove %s (%s)", p, exc)
+        if removed:
+            ctx.logger.info(
+                "no_skip_existing: removed %d existing output(s): %s",
+                len(removed), ', '.join(p.name for p in removed))
+        if kept_dirs:
+            ctx.logger.info(
+                "no_skip_existing: keeping output dir(s) %s — their files are "
+                "recomputed in place",
+                ', '.join(p.name for p in kept_dirs))
+
+    def skip_ready_outputs(self, ctx: ToolContext, label: str) -> bool:
+        """Skip this task when all outputs are ready; True = skipped.
+
+        ``engine.no_skip_existing`` removes the ready outputs instead (and
+        returns False) so the tool recomputes them.
+        """
+        if not self.output_ready(ctx.outputs.values()):
+            return False
+        if self.no_skip_existing(ctx):
+            self.overwrite_outputs(ctx)
+            return False
+        ctx.logger.info("skip %s: %s exists", label,
+                        ', '.join(Path(p).name for p in ctx.outputs.values()))
+        ctx.skipped = True
+        return True
 
 
 _RASTER_EXTS = ('.tif', '.tiff', '.vrt', '.unw', '.int', '.coh',
