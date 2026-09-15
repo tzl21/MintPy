@@ -1,10 +1,9 @@
-"""Tests for external coherence input to unwrap (slc2ifg.unwrap.coh_dir / coh_pattern).
+"""Tests for automatic coherence discovery for unwrap weighting.
 
-Covers:
-  * pair-subdir lookup  coh_dir/{date1}_{date2}/{pattern}
-  * flat fallback      coh_dir/{pattern}
-  * custom pattern filtering (only matching files are picked)
-  * graceful fallback when no external file matches (coh_type stays 'none')
+Coherence rasters are auto-discovered under ``<work_dir>/ifgrams`` as
+``{date1}_{date2}/*.coh.tif`` (kind/variant inferred from the filename);
+when none exists the unwrap node runs with uniform weights (``coh_type``
+``none``).
 """
 
 from mintpy.stdproc.engine.chain import resolve_chain
@@ -13,26 +12,25 @@ from mintpy.stdproc.engine.dag import TaskGraph
 from mintpy.stdproc.engine.engine import Engine
 
 
-def _write_cfg(tmp_path, **opts):
-    """Write a minimal user config (no section header, template merged in)."""
-    lines = [
-        'slc2ifg.work_dir = ' + str(tmp_path / 'work'),
-        'slc2ifg.slc_input = ' + str(tmp_path / 'slc'),
-    ]
-    for k, v in opts.items():
-        lines.append(f'slc2ifg.unwrap.{k} = {v}')
+def _write_cfg(tmp_path):
+    """Write a minimal user config (no section header, template merged in).
+
+    The chain is just ``unwrap`` so the unwrapped variant stays ``fullres``
+    (a multilook/filter stage would make it ``filt_mli``, where complex
+    coherence no longer applies).
+    """
     f = tmp_path / 'test.cfg'
-    f.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    f.write_text(
+        'slc2ifg.work_dir = ' + str(tmp_path / 'work') + '\n'
+        'slc2ifg.slc_input = ' + str(tmp_path / 'slc') + '\n'
+        'engine.stages = unwrap\n',
+        encoding='utf-8')
     return str(f)
 
 
-def _build_unwrap_coh(tmp_path, coh_dir, coh_pattern=None):
+def _build_unwrap_coh(tmp_path):
     """Build the engine unwrap node and return (coh_input, coh_type)."""
-    opts = {'coh_dir': str(coh_dir)}
-    if coh_pattern is not None:
-        opts['coh_pattern'] = coh_pattern
-    cfg_file = _write_cfg(tmp_path, **opts)
-    config = load_engine_config(cfg_file)
+    config = load_engine_config(_write_cfg(tmp_path))
     engine = Engine(config)
     graph = TaskGraph()
     chain = resolve_chain(None, config.tools)
@@ -48,56 +46,49 @@ def _build_unwrap_coh(tmp_path, coh_dir, coh_pattern=None):
     return node.ctx.inputs['coh'], node.ctx.params['coh_type']
 
 
-def test_external_coh_pair_subdir(tmp_path):
-    """External coherence found under coh_dir/{date1}_{date2}/ (default pattern)."""
-    coh_dir = tmp_path / 'ext_coh'
-    pair_dir = coh_dir / '20240101_20240113'
-    pair_dir.mkdir(parents=True)
-    coh_file = pair_dir / 'filt_mli.phsig.coh.tif'
+def _put_coh(tmp_path, name):
+    pair_dir = tmp_path / 'work' / 'ifgrams' / '20240101_20240113'
+    pair_dir.mkdir(parents=True, exist_ok=True)
+    coh_file = pair_dir / name
     coh_file.write_bytes(b'coh')
+    return coh_file
 
-    coh_input, coh_type = _build_unwrap_coh(tmp_path, coh_dir)
+
+def test_auto_coh_phsig(tmp_path):
+    """A {variant}.phsig.coh.tif under <work_dir>/ifgrams is picked up."""
+    coh_file = _put_coh(tmp_path, 'filt_mli.phsig.coh.tif')
+    coh_input, coh_type = _build_unwrap_coh(tmp_path)
     assert coh_input == coh_file
-    assert coh_type == 'external'
+    assert coh_type == 'phsig'
 
 
-def test_external_coh_flat_fallback(tmp_path):
-    """No pair subdir -> flat fallback coh_dir/{pattern} is used."""
-    coh_dir = tmp_path / 'ext_coh'
-    coh_dir.mkdir(parents=True)
-    coh_file = coh_dir / '20240101_20240113.phsig.coh.tif'
-    coh_file.write_bytes(b'coh')
-
-    coh_input, coh_type = _build_unwrap_coh(tmp_path, coh_dir)
+def test_auto_coh_variant_inferred(tmp_path):
+    """Kind/variant are inferred from the filename (mli.phsig here)."""
+    coh_file = _put_coh(tmp_path, 'mli.phsig.coh.tif')
+    coh_input, coh_type = _build_unwrap_coh(tmp_path)
     assert coh_input == coh_file
-    assert coh_type == 'external'
+    assert coh_type == 'phsig'
 
 
-def test_external_coh_custom_pattern(tmp_path):
-    """Only files matching coh_pattern are considered."""
-    coh_dir = tmp_path / 'ext_coh'
-    pair_dir = coh_dir / '20240101_20240113'
-    pair_dir.mkdir(parents=True)
-    target = pair_dir / 'filt_mli.phsig.coh.tif'
-    target.write_bytes(b'coh')
-    other = pair_dir / 'unrelated.txt'
-    other.write_bytes(b'nope')
-
-    coh_input, coh_type = _build_unwrap_coh(tmp_path, coh_dir,
-                                            coh_pattern='*.phsig.coh.tif')
-    assert coh_input == target
-    assert coh_type == 'external'
-
-    # wrong pattern -> no match -> fallback to normal resolution ('none')
-    coh_input, coh_type = _build_unwrap_coh(tmp_path, coh_dir,
-                                            coh_pattern='*_wrong.coh.tif')
-    assert coh_input is None
-    assert coh_type == 'none'
+def test_auto_coh_complex_preferred_for_fullres(tmp_path):
+    """At fullres, a complex coherence raster is used as 'complex'."""
+    coh_file = _put_coh(tmp_path, 'fullres.cpx.coh.tif')
+    coh_input, coh_type = _build_unwrap_coh(tmp_path)
+    assert coh_input == coh_file
+    assert coh_type == 'complex'
 
 
-def test_external_coh_missing_dir_fallback(tmp_path):
-    """coh_dir set but empty/missing -> falls back (no crash, coh stays None)."""
-    coh_dir = tmp_path / 'no_such_coh'
-    coh_input, coh_type = _build_unwrap_coh(tmp_path, coh_dir)
+def test_auto_coh_complex_wins_at_fullres(tmp_path):
+    """At fullres with both kinds present, complex coherence takes priority."""
+    cpx = _put_coh(tmp_path, 'fullres.cpx.coh.tif')
+    _put_coh(tmp_path, 'fullres.phsig.coh.tif')
+    coh_input, coh_type = _build_unwrap_coh(tmp_path)
+    assert coh_input == cpx
+    assert coh_type == 'complex'
+
+
+def test_auto_coh_missing(tmp_path):
+    """No coherence raster -> uniform weights (coh_type 'none')."""
+    coh_input, coh_type = _build_unwrap_coh(tmp_path)
     assert coh_input is None
     assert coh_type == 'none'

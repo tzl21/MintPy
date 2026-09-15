@@ -18,10 +18,7 @@ The engine section controls scheduling/resources/product management:
     engine.gpu = auto                # auto | true | false
     engine.gpu_mem_limit_gb = auto   # default: 70% of GPU memory
     engine.tile_size = auto          # intra-ifg tiling (M4)
-    engine.input_dir = auto          # mid-chain input root (default: ifgram output tree)
-    engine.input_variant = auto      # input ifg variant (default: fullres)
     engine.keep_intermediates = none # none | all | stage list
-    engine.keep_variants = auto      # extra ifg variants to keep (auto = none)
     engine.work_dir = auto           # default: <work_dir>/engine
 
 This module is self-contained: it owns the config I/O helpers (formerly part
@@ -209,8 +206,6 @@ class EngineConfig:
     work_dir: Path
     engine_work_dir: Path
     processor: str
-    ifg_pattern: str
-    cor_pattern: str
 
     # --- tools ---
     tools: List[str] = field(default_factory=list)
@@ -225,18 +220,8 @@ class EngineConfig:
     gpu_mem_limit_gb: Optional[float] = None
     tile_size: Optional[int] = None
 
-    # --- mid-chain input (start from an arbitrary stage's products) ---
-    #: Root of the input products (``{input_dir}/{date1}_{date2}/...`` layout,
-    #: identical to the engine's own output tree).  ``None`` = the engine's
-    #: unified ifgram output tree (``generate_ifgram.output_dir``).
-    input_dir: Optional[str] = None
-    #: Variant of the input interferograms (``fullres | mli | filt | filt_mli``).
-    #: Only meaningful when the chain does not start at ``generate_ifgram``.
-    input_variant: Optional[str] = None
-
     # --- product management ---
     keep_intermediates: str = 'none'
-    keep_variants: List[str] = field(default_factory=list)
     manifest_hash: bool = False
 
     # --- raw config (for tool params) ---
@@ -244,20 +229,14 @@ class EngineConfig:
 
     @property
     def ifgram_out_dir(self) -> Path:
-        """Root directory of ALL interferogram products.
+        """Root directory of ALL interferogram products: ``<work_dir>/ifgrams``.
 
-        Controlled by ``slc2ifg.generate_ifgram.output_dir`` (default:
-        ``<work_dir>/ifgrams``).  Interferogram filenames are unique (date
-        pair + variant), so every processing result — full-res, multilooked,
-        filtered, coherence, unwrapped, connected components — lives in this
-        one directory tree: ``<ifgram_out_dir>/{date1}_{date2}/xxx.ext``.
+        Interferogram filenames are unique (date pair + variant), so every
+        processing result — full-res, multilooked, filtered, coherence,
+        unwrapped, connected components — lives in this one directory tree:
+        ``<ifgram_out_dir>/{date1}_{date2}/xxx.ext``.
         """
-        out = get_opt(self.raw, 'slc2ifg.generate_ifgram.output_dir',
-                      fallback=str(self.work_dir / 'ifgrams'))
-        p = Path(out)
-        if not p.is_absolute():
-            p = (self.work_dir / p).resolve()
-        return p
+        return self.work_dir / 'ifgrams'
 
     @property
     def stitched_dir(self) -> Path:
@@ -301,10 +280,12 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
     slc_input = get_opt(config, 'slc2ifg.slc_input')
     if not slc_input:
         raise ValueError("Missing required configuration: slc2ifg.slc_input")
+    # slc_input may be a glob (e.g. 'xxx/t*/*/'); keep the pattern intact and
+    # only make it absolute relative to the config file directory.
     slc_path = Path(slc_input)
     if not slc_path.is_absolute():
         cfg_dir = getattr(config, 'config_dir', str(Path.cwd()))
-        slc_path = (Path(cfg_dir) / slc_path).resolve()
+        slc_path = Path(cfg_dir) / slc_path
 
     # --- engine section: processing chain ---
     # engine.stages is the single authoritative chain spec.  The legacy
@@ -333,24 +314,11 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
         engine_work_path = (work_path / engine_work_path).resolve()
     engine_work_path.mkdir(parents=True, exist_ok=True)
 
-    ifg_pattern = get_opt(
-        config, 'slc2ifg.ifg_pattern',
-        fallback='**/*.int.tif' if processor == 'isce3' else '**/*.int')
-    cor_pattern = get_opt(
-        config, 'slc2ifg.cor_pattern',
-        fallback='**/*.phsig.coh.tif' if processor == 'isce3' else '**/*.phsig.coh')
-
-    keep_variants_cfg = get_opt(config, 'engine.keep_variants', fallback=None)
-    keep_variants = [v.strip() for v in keep_variants_cfg.split(',')] \
-        if keep_variants_cfg else []
-
     return EngineConfig(
         slc_input=str(slc_path),
         work_dir=work_path,
         engine_work_dir=engine_work_path,
         processor=processor,
-        ifg_pattern=ifg_pattern,
-        cor_pattern=cor_pattern,
         tools=tools,
         stages=stages,
         scheduler=get_opt(config, 'engine.scheduler', fallback='threaded') or 'threaded',
@@ -361,10 +329,7 @@ def load_engine_config(config_file: Optional[str]) -> EngineConfig:
         gpu=get_opt(config, 'engine.gpu', fallback='auto') or 'auto',
         gpu_mem_limit_gb=get_float_opt(config, 'engine.gpu_mem_limit_gb'),
         tile_size=get_int_opt(config, 'engine.tile_size'),
-        input_dir=get_opt(config, 'engine.input_dir'),
-        input_variant=get_opt(config, 'engine.input_variant'),
         keep_intermediates=get_opt(config, 'engine.keep_intermediates', fallback='none') or 'none',
-        keep_variants=keep_variants,
         manifest_hash=get_bool_opt(config, 'engine.manifest_hash', fallback=False),
         raw=config,
     )

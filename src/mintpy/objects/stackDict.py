@@ -439,11 +439,16 @@ class geometryDict:
         geomObj.write2hdf5(outputFile='geometryRadar.h5', access_mode='w', box=(200,500,300,600))
     """
 
-    def __init__(self, name='geometry', processor=None, datasetDict={}, extraMetadata=None):
+    def __init__(self, name='geometry', processor=None, datasetDict={}, extraMetadata=None,
+                 ref_size=None):
         self.name = name
         self.processor = processor
         self.datasetDict = datasetDict
         self.extraMetadata = extraMetadata
+        #: (length, width) of the target grid (the observations / interferogram
+        #: stack).  When set, a full-resolution geometry raster is downsampled
+        #: to this size on read (see load_data / read_inps_dict2geometry_dict_object).
+        self.ref_size = tuple(int(v) for v in ref_size) if ref_size else None
 
         # get extra metadata from geometry file if possible
         self.dsNames = list(self.datasetDict.keys())
@@ -452,6 +457,46 @@ class geometryDict:
             metadata = readfile.read_attribute(dsFile)
             if all(i in metadata.keys() for i in ['STARTING_RANGE', 'RANGE_PIXEL_SIZE']):
                 self.extraMetadata = metadata
+
+    def _downsample_to(self, data, target, family):
+        """Downsample a full-resolution geometry raster to ``target``.
+
+        Block mean (NaN-aware) when the size ratio is an integer — the usual
+        geometry-vs-multilooked-observation case; linear/nearest resize
+        otherwise.  ``*mask*`` datasets keep a boolean valid region.
+        """
+        data = np.asarray(data)
+        is_mask = str(family).lower().endswith('mask')
+        if str(family) == 'height':
+            # DEM no-data sentinel: convert before averaging (write2hdf5 also
+            # converts, but that happens after this downsample)
+            data = data.astype(np.float64)
+            data[data == -32768] = np.nan
+
+        fy = data.shape[0] / target[0]
+        fx = data.shape[1] / target[1]
+        if (fy >= 1 and fx >= 1
+                and abs(fy - round(fy)) < 0.05 and abs(fx - round(fx)) < 0.05):
+            fy, fx = int(round(fy)), int(round(fx))
+            ny, nx = data.shape[0] // fy, data.shape[1] // fx
+            block = data[:ny * fy, :nx * fx].reshape(ny, fy, nx, fx)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', category=RuntimeWarning)
+                out = np.nanmean(block.astype(np.float64), axis=(1, 3))
+            if out.shape != tuple(target):
+                out = out[:target[0], :target[1]]
+            return (out > 0.5) if is_mask else out
+
+        from skimage.transform import resize
+        out = resize(
+            data.astype(np.float32),
+            target,
+            order=0 if is_mask else 1,
+            mode='edge',
+            anti_aliasing=not is_mask,
+            preserve_range=True,
+        )
+        return (out > 0.5) if is_mask else out
 
     def read(self, family, box=None, xstep=1, ystep=1):
         self.file = self.datasetDict[family]
@@ -466,6 +511,15 @@ class geometryDict:
                                        box=box,
                                        xstep=xstep,
                                        ystep=ystep)
+
+        # full-resolution geometry vs multilooked observations: downsample to
+        # the observation grid so the geometry matches the interferogram size.
+        if self.ref_size is not None and np.ndim(data) == 2:
+            target = self.get_size(box=box, xstep=xstep, ystep=ystep)
+            if (data.shape[0] >= target[0] and data.shape[1] >= target[1]
+                    and tuple(data.shape) != tuple(target)):
+                print(f'    downsample {family}: {data.shape} -> {tuple(target)}')
+                data = self._downsample_to(data, target, family)
         return data, metadata
 
     def get_slant_range_distance(self, box=None, xstep=1, ystep=1):
@@ -573,19 +627,33 @@ class geometryDict:
 
         return data
 
-    def get_size(self, family=None, box=None, xstep=1, ystep=1):
+    def _native_size(self, family=None):
+        """Native (LENGTH, WIDTH) of the first geometry raster."""
         if not family:
             family = [i for i in self.datasetDict.keys() if i != 'bperp'][0]
-        self.file = self.datasetDict[family]
-        metadata = readfile.read_attribute(self.file)
+        metadata = readfile.read_attribute(self.datasetDict[family])
+        return int(metadata['LENGTH']), int(metadata['WIDTH'])
 
-        # update due to subset
-        if box:
-            length = box[3] - box[1]
-            width = box[2] - box[0]
+    def get_size(self, family=None, box=None, xstep=1, ystep=1):
+        if self.ref_size is not None:
+            # target grid = the observations (interferogram stack), scaled
+            # proportionally when only a subset box is read
+            length, width = int(self.ref_size[0]), int(self.ref_size[1])
+            if box:
+                nat_h, nat_w = self._native_size(family)
+                length = max(1, int(round(length * (box[3] - box[1]) / nat_h)))
+                width = max(1, int(round(width * (box[2] - box[0]) / nat_w)))
         else:
+            if not family:
+                family = [i for i in self.datasetDict.keys() if i != 'bperp'][0]
+            self.file = self.datasetDict[family]
+            metadata = readfile.read_attribute(self.file)
             length = int(metadata['LENGTH'])
             width = int(metadata['WIDTH'])
+            # update due to subset
+            if box:
+                length = box[3] - box[1]
+                width = box[2] - box[0]
 
         # update due to multilook
         length = length // ystep
@@ -864,6 +932,10 @@ class geometryDict:
             # update due to multilook
             if xstep * ystep > 1:
                 self.metadata = attr.update_attribute4multilook(self.metadata, ystep, xstep)
+            # final guard: the file-level size must match the datasets, which
+            # may have been downsampled to the observation grid (ref_size)
+            self.metadata['LENGTH'] = str(length)
+            self.metadata['WIDTH'] = str(width)
 
             self.metadata['FILE_TYPE'] = self.name
             for key, value in self.metadata.items():

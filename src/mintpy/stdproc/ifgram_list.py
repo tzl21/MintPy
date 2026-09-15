@@ -585,24 +585,14 @@ def _select_params_from_args(args):
     """Build the select-mode parameter dict from CLI arguments."""
     params = {}
     mapping = [
-        ('select_weight_source', 'weight_source'),
         ('select_annual_windows', 'annual_windows'),
         ('select_temp_baseline_max', 'temp_baseline_max'),
         ('select_perp_baseline_max', 'perp_baseline_max'),
         ('select_perp_baseline_file', 'perp_baseline_file'),
-        ('select_coh_dir', 'coh_dir'),
-        ('select_coh_kind', 'coh_kind'),
-        ('select_coh_variant', 'coh_variant'),
-        ('select_coh_stat', 'coh_stat'),
-        ('select_coh_usable_threshold', 'coh_usable_threshold'),
-        ('select_quick_window', 'quick_window'),
         ('select_quick_nlks', 'quick_nlks'),
         ('select_quick_max_workers', 'quick_max_workers'),
-        ('select_model_tau_days', 'model_tau_days'),
-        ('select_model_gamma0', 'model_gamma0'),
         ('select_min_degree', 'min_degree'),
         ('select_max_pairs', 'max_pairs'),
-        ('select_quality_threshold', 'quality_threshold'),
         ('select_quick_debias', 'quick_debias'),
         ('select_robust', 'robust'),
     ]

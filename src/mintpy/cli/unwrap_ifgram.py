@@ -122,9 +122,9 @@ def cmd_line_parse(iargs=None):
     parser = create_parser()
     inps = parser.parse_args(args=iargs)
     if inps.ifg_pattern is None:
-        inps.ifg_pattern = "**/*.int.tif" if inps.processor == "isce3" else "**/*.int"
+        inps.ifg_pattern = "**/*.int.tif"
     if inps.cor_pattern is None:
-        inps.cor_pattern = "**/*.phsig.coh.tif" if inps.processor == "isce3" else "**/*.phsig.coh"
+        inps.cor_pattern = "**/*.phsig.coh.tif"
     inps.ntiles = tuple(inps.ntiles)
     inps.phase_grad_window = tuple(inps.phase_grad_window)
     return inps

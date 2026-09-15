@@ -91,6 +91,48 @@ def parse_wsen(raw) -> Tuple[float, float, float, float]:
 # ---------------------------------------------------------------------------
 # GDAL dataset helpers
 # ---------------------------------------------------------------------------
+#: HDF5 SLC subdataset polarization priority (first match wins)
+POLARIZATIONS: Tuple[str, ...] = ('VV', 'VH', 'HH', 'HV')
+
+#: SLC-derived data groups (not polarization layers) under /data
+_NON_SLC_DATA_GROUPS = {
+    'projection', 'x_coordinates', 'y_coordinates', 'x_spacing', 'y_spacing',
+}
+
+
+def detect_hdf5_subdataset(hdf5_path: Union[str, Path],
+                           subdataset: Optional[str] = None
+                           ) -> Optional[str]:
+    """Resolve the HDF5 subdataset of an SLC, auto-detecting the polarization.
+
+    An explicit ``subdataset`` is returned unchanged.  Otherwise the
+    ``/data/<POL>`` groups present in the file are inspected and the first by
+    priority (``VV > VH > HH > HV``) is returned.  When the file cannot be
+    opened, the polarization token in the filename is used as a fallback.
+
+    Returns ``None`` for a non-HDF5 file or when no polarization is found.
+    """
+    if subdataset:
+        return subdataset
+    path = str(hdf5_path)
+    if not is_hdf5_file(path):
+        return None
+    try:
+        import h5py
+        with h5py.File(path, 'r') as h5file:
+            if '/data' in h5file:
+                names = set(h5file['/data'].keys())
+                for pol in POLARIZATIONS:
+                    if pol in names:
+                        return f'/data/{pol}'
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug('subdataset detection failed for %s: %s', path, exc)
+    match = re.search(r'_(VV|VH|HH|HV)[_.]', Path(path).name)
+    if match:
+        return f'/data/{match.group(1)}'
+    return None
+
+
 def open_raster(file_path: Union[str, Path], subdataset: Optional[str] = None):
     """Open a raster with GDAL, resolving HDF5 subdatasets.
 
@@ -98,13 +140,15 @@ def open_raster(file_path: Union[str, Path], subdataset: Optional[str] = None):
     VRT sources), so GDAL's netCDF driver reads OPERA-style metadata
     (``x_coordinates``/``y_coordinates``/``projection``) and returns real
     georeferencing instead of the HDF5 driver's default identity transform.
+    When ``subdataset`` is not given it is auto-detected
+    (:func:`detect_hdf5_subdataset`, preferring VV).
 
     Parameters
     ----------
     file_path : str or Path
         Path to the raster (GeoTIFF / ENVI / HDF5 / VRT ...).
     subdataset : str, optional
-        HDF5 subdataset path, e.g. ``/data/VV``.
+        HDF5 subdataset path, e.g. ``/data/VV``; auto-detected when omitted.
 
     Returns
     -------
@@ -113,6 +157,8 @@ def open_raster(file_path: Union[str, Path], subdataset: Optional[str] = None):
     from osgeo import gdal
 
     path = str(file_path)
+    if is_hdf5_file(path):
+        subdataset = detect_hdf5_subdataset(path, subdataset)
     if subdataset and is_hdf5_file(path):
         path = f'NETCDF:"{path}":"//{str(subdataset).lstrip("/")}"'
     return gdal.Open(path, gdal.GA_ReadOnly)
@@ -410,10 +456,14 @@ def write_product(data, out_file: Union[str, Path], processor: str = 'isce3',
 # complex_coh / select quick-coherence)
 # ---------------------------------------------------------------------------
 def read_hdf5_metadata(hdf5_path: Union[str, Path],
-                       subdataset: str = '/data/VV') -> Dict:
-    """Read the geolocation metadata of an HDF5 (OPERA GSLC style) SLC."""
+                       subdataset: Optional[str] = None) -> Dict:
+    """Read the geolocation metadata of an HDF5 (OPERA GSLC style) SLC.
+
+    ``subdataset`` is auto-detected (preferring VV) when not given.
+    """
     import h5py
 
+    subdataset = detect_hdf5_subdataset(hdf5_path, subdataset)
     metadata: Dict = {}
     with h5py.File(hdf5_path, 'r') as h5file:
         if '/data/projection' in h5file:
@@ -443,7 +493,7 @@ def read_hdf5_metadata(hdf5_path: Union[str, Path],
 
 
 def hdf5_window(hdf5_path: Union[str, Path], crop_bounds_4326,
-                subdataset: str = '/data/VV') -> Optional[Dict]:
+                subdataset: Optional[str] = None) -> Optional[Dict]:
     """Pixel window of the bbox intersection inside an HDF5 SLC.
 
     Uses the file's ``x_coordinates``/``y_coordinates`` metadata: computes the
@@ -550,7 +600,7 @@ def hdf5_window(hdf5_path: Union[str, Path], crop_bounds_4326,
 
 
 def bbox_to_window(slc_path: Union[str, Path], wsen,
-                   subdataset: str = '/data/VV', buffer: float = 0.0
+                   subdataset: Optional[str] = None, buffer: float = 0.0
                    ) -> Optional[Tuple[int, int, int, int]]:
     """Map a WSEN bbox (EPSG:4326, degrees) to a pixel window in an SLC file.
 
@@ -564,8 +614,8 @@ def bbox_to_window(slc_path: Union[str, Path], wsen,
         Geocoded SLC (GeoTIFF, or HDF5 with x/y_coordinates).
     wsen : tuple of 4 floats
         (west, south, east, north) in EPSG:4326.
-    subdataset : str
-        HDF5 subdataset path (HDF5 SLCs only).
+    subdataset : str, optional
+        HDF5 subdataset path (HDF5 SLCs only); auto-detected when omitted.
     buffer : float
         Extra margin in degrees added around ``wsen``.
 

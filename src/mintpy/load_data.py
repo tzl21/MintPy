@@ -514,16 +514,25 @@ def read_inps_dict2geometry_dict_object(iDict, dset_name2template_key):
 
     geomGeoObj = None
     geomRadarObj = None
+
+    def _obs_size(meta):
+        """(length, width) of the observations, or None when unavailable."""
+        if meta is not None and 'LENGTH' in meta.keys() and 'WIDTH' in meta.keys():
+            return (int(meta['LENGTH']), int(meta['WIDTH']))
+        return None
+
     if len(dsGeoPathDict) > 0:
         geomGeoObj = geometryDict(
             processor=iDict['processor'],
             datasetDict=dsGeoPathDict,
-            extraMetadata=obsMetaGeo)
+            extraMetadata=obsMetaGeo,
+            ref_size=_obs_size(obsMetaGeo))
     if len(dsRadarPathDict) > 0:
         geomRadarObj = geometryDict(
             processor=iDict['processor'],
             datasetDict=dsRadarPathDict,
-            extraMetadata=obsMetaRadar)
+            extraMetadata=obsMetaRadar,
+            ref_size=_obs_size(obsMetaRadar))
 
     return geomGeoObj, geomRadarObj
 

@@ -34,11 +34,12 @@ def create_parser(subparsers=None):
     parser.add_argument('--output-dir', type=str, required=True,
                         help="Output directory for stitched products")
     parser.add_argument('--file-types', type=str, nargs='+',
-                        default=['.int.tif', '.cpx.coh.tif'],
-                        help="File extensions to stitch")
-    parser.add_argument('--out-bounds', type=float, nargs=4,
+                        default=None,
+                        help="File extensions to stitch (default: auto-detect "
+                             "wrapped interferograms and complex coherence)")
+    parser.add_argument('--bbox', type=float, nargs=4,
                         metavar=('WEST', 'SOUTH', 'EAST', 'NORTH'), default=None,
-                        help="Final crop bounds in EPSG:4326. "
+                        help="Final crop bounds in EPSG:4326 (same as slc2ifg.bbox). "
                              "If not set, the full union extent of all bursts is stitched.")
     parser.add_argument('--output-prefix', type=str, default='',
                         help="Prefix for output subdirectories")

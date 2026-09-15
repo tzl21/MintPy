@@ -648,9 +648,10 @@ def _unwrap_single(
     # Zero-valued magnitude → invalid
     mask_zeros = (ifg_data.real == 0) & (ifg_data.imag == 0)
 
-    # External mask: .wbd water masks are warped onto the ifg grid (SNAPHU
-    # semantics: 1 = valid/land, 0 = water/excluded); any other GDAL-readable
-    # file is used as-is.
+    # Optional unwrap mask.  Valid region = nonzero (1), excluded = 0 — the
+    # same convention as MintPy's waterMask geometry layer and the SNAPHU
+    # BYTEMASKFILE.  .wbd water-body rasters (1 = water) are warped onto the
+    # ifg grid and inverted; a ``waterBody*`` raster is inverted in place.
     mask_array = None
     if mask_path is not None and mask_path.exists():
         if str(mask_path).lower().endswith('.wbd'):
@@ -669,6 +670,11 @@ def _unwrap_single(
                 raise ValueError(
                     f"Mask raster {mask_path} has shape {mask_array.shape}, "
                     f"expected {(rows, cols)} matching the interferogram")
+            if os.path.basename(str(mask_path)).startswith('waterBody'):
+                # water body: 1 = water, 0 = land -> invert to 1 = valid
+                mask_array = (mask_array == 0).astype(np.uint8)
+                logger.info("waterBody mask inverted: %d water pixel(s) excluded",
+                            int(np.count_nonzero(mask_array == 0)))
 
     # Initial phase
     init_phase_array = None

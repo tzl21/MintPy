@@ -151,27 +151,34 @@ Implemented in `select_ifgrams.select_ifgrams`; orchestrated by
   misses. This is the recommended default.
 * **"fully connected on a small window / downsampled SLCs"** —
   `num_connections = 0`, `annual_windows = none`, `temp_baseline_max = N`
-  (or any window), then let `weight_source = coherence` with the
-  on-the-fly quick coherence: every candidate is screened on the AOI
-  window of the SLCs (or, without `slc2ifg.bbox`, on a `quick_grid`×
-  `quick_grid` sample of `quick_block`×`quick_block` windows), which costs
-  milliseconds per pair, and the selection keeps only the high-coherence
-  ones. For large `N`, prefer capping `temp_baseline_max` so the
-  `N(N-1)/2` candidate set stays manageable.
+  (or any window), ranked by the on-the-fly quick coherence: every
+  candidate is screened on the AOI window of the SLCs (or, without
+  `slc2ifg.bbox`, on a `quick_grid`× `quick_grid` sample of
+  `quick_block`×`quick_block` windows), which costs milliseconds per pair,
+  and the selection keeps only the high-coherence ones. For large `N`,
+  prefer capping `temp_baseline_max` so the `N(N-1)/2` candidate set stays
+  manageable.
 
 ### 3.2 Quality weights
 
-| source | formula / statistic | when to use |
-|---|---|---|
-| `model` | `gamma0 * exp(-dt/tau)` | no SLCs/coherence handy; cold start; stable scenes |
-| `coherence` (rasters) | mean / median / usable-fraction / Fisher info of an existing `coh` map | reuse a pilot run's coherence products |
-| `coherence` (quick) | same statistics of complex coherence computed on the **AOI window** (or a whole-scene grid sample) of the SLCs (Touzi debias) | the standard choice; SLCs are already available |
-| `mixed` | measured where present, model fills gaps | robustness against missing rasters |
+The weight of every candidate edge is **measured coherence**; there is no
+quality-model option anymore. The coherence comes from:
 
-`usable_frac` (fraction of pixels with coherence >= a threshold) is a
-good proxy for the *unwrappable area*; `fisher`
+| source | formula / statistic | when used |
+|---|---|---|
+| coherence rasters | mean / median / usable-fraction / Fisher info of a `*.coh.tif` map | preferred when the product tree already holds coherence rasters |
+| quick coherence | same statistics of complex coherence computed on the **AOI window** (or a whole-scene grid sample) of the SLCs (Touzi debias) | fallback when no coherence raster exists for any candidate |
+
+Existing rasters are auto-discovered under `<work_dir>/ifgrams`:
+`{date1}_{date2}/*.coh.tif`, with the kind (`phsig` > `cpx`) and variant
+(`filt_mli` > `filt` > `mli` > `fullres`) inferred from the filename. When
+no candidate pair has a raster, the on-the-fly quick coherence on the SLCs
+is used instead.
+
+`usable_frac` (fraction of pixels with coherence >= `quick_usable_threshold`)
+is a good proxy for the *unwrappable area*; `fisher`
 (`gamma^2/(1-gamma^2)`) is the information-theoretic weight matching
-section 2.3 — both are reasonable drop-in alternatives to the plain mean.
+section 2.3. `quick_stat` selects the statistic for BOTH sources.
 
 ### 3.3 Selection guarantees
 
@@ -188,9 +195,6 @@ section 2.3 — both are reasonable drop-in alternatives to the plain mean.
 * **`robust = true`** — replaces every bridge by the highest-weight
   candidate crossing its cut, where such a candidate exists (2-edge
   robustness).
-* **`quality_threshold`** — augmentation floor; the spanning tree may
-  still use below-threshold edges, because connectivity is a hard
-  guarantee (a warning is logged).
 * **Determinism** — ties in weight are broken lexicographically, so the
   output is reproducible.
 
@@ -210,8 +214,8 @@ as JSON. The engine logs a one-line summary during graph building.
 slc2ifg.ifgram_list.mode = select
 
 # 3-NN skeleton + half-year / one-year pairs, ranked by measured
-# coherence computed on the SLCs (no extra products needed)
-slc2ifg.ifgram_list.select.weight_source = coherence
+# coherence (existing rasters under <work_dir>/ifgrams, else computed on
+# the SLCs — no extra products needed)
 slc2ifg.ifgram_list.select.min_degree = 2
 slc2ifg.ifgram_list.select.robust = true
 slc2ifg.ifgram_list.select.report = ifgram_selection.json
@@ -220,10 +224,10 @@ slc2ifg.ifgram_list.select.report = ifgram_selection.json
 # slc2ifg.ifgram_list.num_connections = 3
 # slc2ifg.ifgram_list.select.annual_windows = 182:10,365:15   # or auto (default)
 # slc2ifg.ifgram_list.select.temp_baseline_max = 60
-# slc2ifg.ifgram_list.select.quick_window = 5
 # slc2ifg.ifgram_list.select.quick_nlks = 1                   # bbox-window downsampling
+# slc2ifg.ifgram_list.select.quick_stat = mean                # mean|median|usable_frac|fisher
+# slc2ifg.ifgram_list.select.quick_usable_threshold = 0.3     # quick_stat=usable_frac
 # slc2ifg.ifgram_list.select.max_pairs = 300
-# slc2ifg.ifgram_list.select.quality_threshold = 0.3
 ```
 
 With `slc2ifg.bbox` (and `slc2ifg.bbox_buffer`) set, the quick coherence
@@ -241,36 +245,33 @@ depends on it), the same way `sequential` mode does today.
 
 ```bash
 python mintpy.stdproc.slc2ifg.ifgram_list --slc ./slc --mode select \
-    --select-weight-source model --select-min-degree 2 \
-    --select-report report.json
+    --select-min-degree 2 --select-report report.json
 ```
 
 ### 4.3 Weight sources in detail
 
-* `model` — needs nothing but the date list.
-* `coherence` with `select.coh_dir` — reads existing
-  `{coh_dir}/{date1}_{date2}/{variant}_{kind}.coh[.tif]` rasters
-  (e.g. `filt_mli.phsig.coh.tif` produced by a pilot run); missing
-  rasters fall back to weight 0 (or to the model in `mixed` mode).
-* `coherence` without `coh_dir` — on-the-fly quick coherence from the
-  SLC directory: with `slc2ifg.bbox` set, only the AOI window of each SLC
-  is read (block-mean downsampled by `quick_nlks`, default 1); otherwise a
-  whole-scene grid sample is used. Complex correlation + Touzi debias +
-  robust statistic either way.
-* `mixed` — measured where available, `model` fills gaps.
+* coherence rasters — auto-discovered as
+  `{ifgram_root}/{date1}_{date2}/*.coh.tif` (e.g.
+  `filt_mli.phsig.coh.tif` produced by a pilot run); kind and variant are
+  inferred from the filename. Missing rasters give that pair weight 0.
+* quick coherence — fallback when no candidate has a raster: with
+  `slc2ifg.bbox` set, only the AOI window of each SLC is read (block-mean
+  downsampled by `quick_nlks`, default 1); otherwise a whole-scene grid
+  sample is used. Complex correlation + Touzi debias + robust statistic
+  either way. The boxcar window is fixed at 8 pixels.
 
 ## 5. Practical recommendations
 
 * **Default recipe** (C-band, Sentinel-1-like, 12-day cycle):
   `num_connections = 3`, `annual_windows = auto` (windows derived from
   the repeat cycle; `182:10,365:15` on a 12-day grid),
-  `weight_source = coherence` (quick), `min_degree = 2`,
-  `robust = true`. This typically replaces a k=5-8 NN network with
-  roughly half to two-thirds the interferograms at higher average
-  coherence.
+  `min_degree = 2`, `robust = true`. This typically replaces a k=5-8 NN
+  network with roughly half to two-thirds the interferograms at higher
+  average coherence.
 * **Very long series / low-coherence scenes**: raise `min_degree`
-  to 3-4 or lower `model_tau_days` so the model prefers short
-  baselines, and let `quality_threshold` cut the tail.
+  to 3-4, cap `temp_baseline_max` to prefer short baselines, and/or use
+  `quick_stat = usable_frac` to keep only pairs with a large unwrappable
+  area.
 * **Robustness to unwrap failures**: `min_degree >= 2` + `robust = true`
   is the cheap insurance; full 2-edge-connectivity is guaranteed only
   where the candidate set provides crossing edges.

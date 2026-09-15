@@ -28,7 +28,6 @@ from mintpy.stdproc.select_ifgrams import (
     read_perp_baselines,
     select_ifgrams,
     select_pairs,
-    temporal_model_weights,
     verify_selection,
     write_report,
 )
@@ -57,6 +56,25 @@ def _multi_year_dates(n=61, step_days=12, start='20230105'):
 def _random_weights(dates, cand, seed=0):
     rng = np.random.default_rng(seed)
     return {p: float(rng.uniform(0.1, 1.0)) for p in cand}
+
+
+def _fake_slc_sources(tmp_path, dates, size=48, seed=3, suffix='.slc.tif'):
+    """Fake SLC files + a {path: complex array} map for the fake GDAL.
+
+    Returns ``(slc_dir, sources, {date: path})``.
+    """
+    rng = np.random.default_rng(seed)
+    slc_dir = tmp_path / 'slc'
+    slc_dir.mkdir(exist_ok=True)
+    sources, files = {}, {}
+    for d in dates:
+        p = slc_dir / f'{d}{suffix}'
+        p.touch()
+        sources[str(p)] = (
+            rng.normal(size=(size, size)) + 1j * rng.normal(size=(size, size))
+        ).astype(np.complex64)
+        files[d] = p
+    return slc_dir, sources, files
 
 
 # ------------------------------------------------------------------------
@@ -447,21 +465,6 @@ def test_max_pairs_budget():
     assert len(sel) == len(DATES) - 1
 
 
-def test_quality_threshold_only_limits_augmentation():
-    cand = generate_candidates(DATES, num_connections=3, annual_windows=())
-    w = _random_weights(DATES, cand, seed=9)
-    # threshold above every weight: still connected via the spanning tree
-    sel, rep = select_ifgrams(DATES, cand, w, min_degree=1,
-                              quality_threshold=2.0)
-    assert check_connected(DATES, sel)
-    assert len(sel) == len(DATES) - 1
-    # min-degree augmentation is also gated by the threshold
-    sel, rep = select_ifgrams(DATES, cand, w, min_degree=3,
-                              quality_threshold=2.0)
-    assert len(sel) == len(DATES) - 1  # no augmentation above threshold
-    assert rep['degree_unmet']
-
-
 def test_missing_weights_treated_as_zero():
     cand = generate_candidates(DATES, num_connections=3, annual_windows=())
     w = _random_weights(DATES, cand, seed=2)
@@ -534,24 +537,6 @@ def test_bridge_repair():
 # ------------------------------------------------------------------------
 # Weights
 # ------------------------------------------------------------------------
-def test_temporal_model_weights():
-    cand = [(DATES[0], d) for d in DATES[1:]]
-    w = temporal_model_weights(DATES, cand, tau_days=90.0, gamma0=0.9)
-    dts = [(np.datetime64(b) - np.datetime64(a)).astype('timedelta64[D]')
-           for a, b in cand]
-    vals = [w[p] for p in cand]
-    # monotone decreasing in temporal baseline
-    order = np.argsort(dts)
-    assert all(vals[order[i]] >= vals[order[i + 1]] for i in range(len(vals) - 1))
-    # bounds
-    assert all(0.0 <= v <= 0.9 for v in vals)
-    # perpendicular factor
-    perp = {d: float(i * 30) for i, d in enumerate(DATES)}
-    w2 = temporal_model_weights(DATES, cand, tau_days=90.0, gamma0=1.0,
-                                perp_baselines=perp, perp_baseline_max=60.0)
-    assert all(w2[p] <= w[p] for p in cand)
-
-
 def test_aggregate_coherence_stats():
     arr = np.array([0.0, 0.4, 0.6, 0.8, 0.0, 0.5])
     assert abs(aggregate_coherence(arr, 'mean') - 0.575) < 1e-12
@@ -630,51 +615,49 @@ def test_added_edges_reduce_estimate_covariance():
 # ------------------------------------------------------------------------
 def test_select_pairs_end_to_end(tmp_path):
     report_file = tmp_path / 'selection_report.json'
-    pairs, rep = select_pairs(
-        DATES,
-        params={'weight_source': 'model', 'min_degree': 2,
-                'report_file': str(report_file)})
-    assert check_connected(DATES, pairs)
+    dates = DATES[:5]
+    _slc_dir, sources, files = _fake_slc_sources(tmp_path, dates)
+    _install_fake_osgeo(sources)
+    try:
+        pairs, rep = select_pairs(
+            dates, params={'min_degree': 2, 'slc_files': files,
+                           'report_file': str(report_file)})
+    finally:
+        _uninstall_fake_osgeo()
+    assert check_connected(dates, pairs)
     assert rep['connected'] and rep['full_rank']
-    assert rep['weight_source'] == 'model'
-    assert rep['n_dates'] == len(DATES)
+    assert rep['weight_source'] == 'quick_coherence'
+    assert rep['n_dates'] == len(dates)
     assert report_file.exists()
     data = json.loads(report_file.read_text())
     assert data['n_selected'] == len(pairs)
     assert 'n_dates' in data and 'full_rank' in data
 
 
-def test_select_pairs_weight_source_validation():
+def test_select_pairs_needs_coherence_source():
+    """No coherence rasters and no SLC input -> hard error (never a silent
+    complete-graph selection)."""
     try:
-        select_pairs(DATES, params={'weight_source': 'bogus'})
+        select_pairs(DATES, params={'min_degree': 2})
     except ValueError as e:
-        assert 'weight_source' in str(e)
+        assert 'coherence' in str(e)
     else:
-        raise AssertionError('expected ValueError for bad weight_source')
-
-
-def test_select_pairs_needs_slc_for_measured(tmp_path):
-    try:
-        select_pairs(DATES, params={'weight_source': 'coherence'})
-    except ValueError as e:
-        assert 'coh_dir' in str(e) or 'SLC' in str(e)
-    else:
-        raise AssertionError('expected ValueError without coherence source')
+        raise AssertionError('expected ValueError without a coherence source')
 
 
 def test_select_pairs_coherence_without_measurable_weights(tmp_path):
-    """weight_source=coherence with nothing measurable -> hard error.
+    """A coherence source that yields nothing measurable -> hard error.
 
     Regression: every candidate got weight 0.0, which made the
     mean-augmentation "not below the running mean" test trivially true and
-    silently selected the *complete* candidate graph (30 dates -> 435 pairs).
+    silently selected the *complete* candidate graph.
     """
     dates = DATES[:3]
     _install_fake_osgeo({})
     try:
         try:
             select_pairs(dates, slc_dir=str(tmp_path),
-                         params={'weight_source': 'coherence'})
+                         params={'min_degree': 2})
         except ValueError as e:
             assert 'coherence' in str(e)
         else:
@@ -704,25 +687,35 @@ def test_verify_selection_report():
                    'full_rank': True}
 
 
-def test_generate_pairs_select_mode():
+def test_generate_pairs_select_mode(tmp_path):
     from mintpy.stdproc.ifgram_list import generate_pairs
-    cand = generate_candidates(DATES, num_connections=3, annual_windows=())
-    w = _random_weights(DATES, cand, seed=6)
-    pairs = generate_pairs(
-        DATES, mode='select', num_connections=3, oneyear_range=None,
-        select_params={'weight_source': 'model', 'min_degree': 2})
-    assert check_connected(DATES, pairs)
-    assert len(pairs) >= len(DATES) - 1
+    dates = DATES[:5]
+    _slc_dir, sources, files = _fake_slc_sources(tmp_path, dates)
+    _install_fake_osgeo(sources)
+    try:
+        pairs = generate_pairs(
+            dates, mode='select', num_connections=3, oneyear_range=None,
+            select_params={'min_degree': 2, 'slc_files': files})
+    finally:
+        _uninstall_fake_osgeo()
+    assert check_connected(dates, pairs)
+    assert len(pairs) >= len(dates) - 1
 
 
-def test_generate_pairs_select_uses_num_connections():
+def test_generate_pairs_select_uses_num_connections(tmp_path):
     from mintpy.stdproc.ifgram_list import generate_pairs
-    pairs = generate_pairs(
-        DATES, mode='select', num_connections=1, oneyear_range=None,
-        select_params={'weight_source': 'model', 'min_degree': 1})
+    dates = DATES[:5]
+    _slc_dir, sources, files = _fake_slc_sources(tmp_path, dates)
+    _install_fake_osgeo(sources)
+    try:
+        pairs = generate_pairs(
+            dates, mode='select', num_connections=1, oneyear_range=None,
+            select_params={'min_degree': 1, 'slc_files': files})
+    finally:
+        _uninstall_fake_osgeo()
     # k=1 skeleton = a single chain; pure spanning tree = N-1 edges
-    assert check_connected(DATES, pairs)
-    assert len(pairs) == len(DATES) - 1
+    assert check_connected(dates, pairs)
+    assert len(pairs) == len(dates) - 1
 
 
 # ------------------------------------------------------------------------
@@ -730,37 +723,40 @@ def test_generate_pairs_select_uses_num_connections():
 # ------------------------------------------------------------------------
 def test_ifgram_list_cli_select_mode(tmp_path, capsys):
     from mintpy.cli import ifgram_list
-    slc_dir = tmp_path / 'slc'
-    slc_dir.mkdir()
-    for d in DATES:
-        (slc_dir / d).mkdir()
+    dates = DATES[:5]
+    slc_dir, sources, _files = _fake_slc_sources(tmp_path, dates)
     out = tmp_path / 'ifg'
-    rc = ifgram_list.main([
-        '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'select',
-        '--select-weight-source', 'model', '--select-min-degree', '2',
-    ])
+    _install_fake_osgeo(sources)
+    try:
+        rc = ifgram_list.main([
+            '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'select',
+            '--select-min-degree', '2',
+        ])
+    finally:
+        _uninstall_fake_osgeo()
     assert rc == 0
     pair_file = out / 'ifgram_list.txt'
     assert pair_file.exists()
     lines = [l.strip() for l in pair_file.read_text().splitlines()
              if l.strip() and not l.startswith('#')]
-    assert len(lines) == len(DATES) - 1 + 2  # tree + min-degree=2 extras
-    assert check_connected(DATES, [tuple(l.split('-')) for l in lines])
+    assert len(lines) >= len(dates) - 1
+    assert check_connected(dates, [tuple(l.split('-')) for l in lines])
 
 
 def test_ifgram_list_cli_select_report(tmp_path):
     from mintpy.cli import ifgram_list
-    slc_dir = tmp_path / 'slc'
-    slc_dir.mkdir()
-    for d in DATES:
-        (slc_dir / d).mkdir()
+    dates = DATES[:5]
+    slc_dir, sources, _files = _fake_slc_sources(tmp_path, dates)
     out = tmp_path / 'ifg'
     report = tmp_path / 'report.json'
-    rc = ifgram_list.main([
-        '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'select',
-        '--select-weight-source', 'model',
-        '--select-report', str(report),
-    ])
+    _install_fake_osgeo(sources)
+    try:
+        rc = ifgram_list.main([
+            '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'select',
+            '--select-report', str(report),
+        ])
+    finally:
+        _uninstall_fake_osgeo()
     assert rc == 0
     data = json.loads(report.read_text())
     assert data['connected'] is True
@@ -776,26 +772,26 @@ def test_engine_select_mode_plan(tmp_path):
     from mintpy.stdproc.engine.config import load_engine_config
     from mintpy.stdproc.engine.engine import Engine
 
-    inp = tmp_path / 'input'
-    inp.mkdir()
     dates = ['20220105', '20220117', '20220129', '20220210',
              '20220222', '20220306']
-    for d in dates:
-        (inp / f'{d}.slc.tif').touch()
+    slc_dir, sources, _files = _fake_slc_sources(tmp_path, dates)
     cfg = tmp_path / 'mini.cfg'
     cfg.write_text(
         f'slc2ifg.work_dir = {tmp_path}\n'
-        f'slc2ifg.slc_input = {inp}\n'
+        f'slc2ifg.slc_input = {slc_dir}\n'
         'slc2ifg.processor = isce3\n'
         'engine.max_workers = 2\n'
         'engine.gpu = false\n'
         'slc2ifg.ifgram_list.mode = select\n'
-        'slc2ifg.ifgram_list.select.weight_source = model\n'
         'slc2ifg.ifgram_list.select.min_degree = 2\n'
         'slc2ifg.ifgram_list.select.report = selection.json\n'
     )
-    eng = Engine(load_engine_config(str(cfg)))
-    g = eng.plan(dry_run=True)
+    _install_fake_osgeo(sources)
+    try:
+        eng = Engine(load_engine_config(str(cfg)))
+        g = eng.plan(dry_run=True)
+    finally:
+        _uninstall_fake_osgeo()
     pair_file = eng.ifgram_dir / 'ifgram_list.txt'
     assert pair_file.exists()
     pairs = eng._read_pairs(pair_file)
@@ -1068,8 +1064,7 @@ def test_weights_from_coherence_rasters(tmp_path):
     gdal_fake = _install_fake_osgeo(sources)
     try:
         w = weights_from_coherence_rasters(
-            pairs, str(coh_dir), kind='phsig', variant='filt_mli',
-            processor='isce3', stat='mean')
+            pairs, str(coh_dir), processor='isce3', stat='mean')
         assert abs(w[pairs[0]] - 0.9) < 1e-6
         assert abs(w[pairs[1]] - 0.4) < 1e-6
         assert w[pairs[2]] is None
@@ -1078,8 +1073,8 @@ def test_weights_from_coherence_rasters(tmp_path):
 
 
 def test_select_pairs_with_quick_coherence_end_to_end(tmp_path):
-    """select_pairs with weight_source='coherence' (quick path) selects a
-    connected, full-rank network on synthetic SLCs."""
+    """select_pairs falls back to quick coherence on the SLCs and selects a
+    connected, full-rank network."""
     from mintpy.stdproc.select_ifgrams import select_pairs
 
     rng = np.random.default_rng(3)
@@ -1096,8 +1091,7 @@ def test_select_pairs_with_quick_coherence_end_to_end(tmp_path):
     try:
         pairs, rep = select_pairs(
             dates, slc_dir=str(slc_dir), processor='isce3',
-            params={'weight_source': 'coherence', 'min_degree': 2,
-                    'quick_nlks': 6, 'quick_window': 3})
+            params={'min_degree': 2, 'quick_nlks': 6})
         assert check_connected(dates, pairs)
         assert rep['connected'] and rep['full_rank']
         assert rep['weight_source'] == 'quick_coherence'
@@ -1109,7 +1103,7 @@ def test_select_pairs_with_quick_coherence_end_to_end(tmp_path):
 # ------------------------------------------------------------------------
 # Determinism, min_degree=0, DOT output, parallel quick coherence
 # ------------------------------------------------------------------------
-def test_selection_deterministic():
+def test_selection_deterministic(tmp_path):
     """Same input twice -> bit-identical pair lists (both select_ifgrams and
     the full select_pairs pipeline)."""
     cand = generate_candidates(DATES, num_connections=3, annual_windows=())
@@ -1117,10 +1111,18 @@ def test_selection_deterministic():
     sel1, r1 = select_ifgrams(DATES, cand, w, min_degree=2, robust=True)
     sel2, r2 = select_ifgrams(DATES, cand, w, min_degree=2, robust=True)
     assert sel1 == sel2 and r1['n_selected'] == r2['n_selected']
-    p1, rep1 = select_pairs(DATES, params={'weight_source': 'model',
-                                           'min_degree': 2, 'robust': True})
-    p2, rep2 = select_pairs(DATES, params={'weight_source': 'model',
-                                           'min_degree': 2, 'robust': True})
+    dates = DATES[:5]
+    _slc_dir, sources, files = _fake_slc_sources(tmp_path, dates)
+    _install_fake_osgeo(sources)
+    try:
+        p1, rep1 = select_pairs(dates, params={'min_degree': 2,
+                                               'robust': True,
+                                               'slc_files': files})
+        p2, rep2 = select_pairs(dates, params={'min_degree': 2,
+                                               'robust': True,
+                                               'slc_files': files})
+    finally:
+        _uninstall_fake_osgeo()
     assert p1 == p2
     assert rep1['n_selected'] == rep2['n_selected']
 
@@ -1134,26 +1136,27 @@ def test_min_degree_zero_equals_tree():
     assert sel0 == sel1
     assert len(sel0) == len(DATES) - 1
     assert rep0['min_degree_target'] == 0
-    # through the full pipeline as well
-    p0, r0 = select_pairs(DATES, params={'weight_source': 'model',
-                                         'min_degree': 0})
-    assert len(p0) == len(DATES) - 1
-    assert check_connected(DATES, p0)
 
 
 def test_network_dot_output(tmp_path):
     dot = tmp_path / 'net.dot'
-    pairs, rep = select_pairs(DATES, params={
-        'weight_source': 'model', 'min_degree': 2, 'dot_file': str(dot)})
+    dates = DATES[:5]
+    _slc_dir, sources, files = _fake_slc_sources(tmp_path, dates)
+    _install_fake_osgeo(sources)
+    try:
+        pairs, rep = select_pairs(dates, params={
+            'min_degree': 2, 'dot_file': str(dot), 'slc_files': files})
+    finally:
+        _uninstall_fake_osgeo()
     assert dot.exists()
     text = dot.read_text()
     assert text.startswith('digraph ifgram_network {')
     assert 'rankdir=LR;' in text
-    for d in DATES:
+    for d in dates:
         assert f'"{d}";' in text
     # every selected pair is drawn; tree edges are bold
     tree = {tuple(e.split('_')) for e in rep['tree_edges']}
-    assert len(tree) == len(DATES) - 1
+    assert len(tree) == len(dates) - 1
     for a, b in pairs:
         assert f'"{a}" -> "{b}"' in text
     assert any('style=bold' in line for line in text.splitlines())

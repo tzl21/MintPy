@@ -325,7 +325,7 @@ def estimate_phsig_correlation(
 # file I/O
 # ===========================================================================
 def read_complex_image(filename: str, processor: str,
-                       subdataset: str = '/data/VV',
+                       subdataset: Optional[str] = None,
                        window: Optional[Tuple[int, int, int, int]] = None,
                        ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Read a complex SLC / interferogram with processor-specific awareness.
@@ -542,7 +542,7 @@ def phsig_sigma_path(input_file, output_dir, processor: str) -> Path:
 # ===========================================================================
 def process_slc_pair(slc1_file: str, slc2_file: str, output_dir: Path,
                      params: Dict[str, Any], processor: str,
-                     subdataset: str = '/data/VV') -> Tuple[str, str, bool, str]:
+                     subdataset: Optional[str] = None) -> Tuple[str, str, bool, str]:
     """Process one SLC pair and write the complex-coherence product."""
     date1 = extract_date_from_slc(slc1_file)
     date2 = extract_date_from_slc(slc2_file)
@@ -577,7 +577,7 @@ def process_slc_pair(slc1_file: str, slc2_file: str, output_dir: Path,
 
 def process_phsig_file(input_file: str, output_dir: Path,
                        params: Dict[str, Any], processor: str,
-                       subdataset: str = '/data/VV') -> Tuple[str, bool, str]:
+                       subdataset: Optional[str] = None) -> Tuple[str, bool, str]:
     """Process one interferogram and write the phase-sigma coherence (+ sigma)."""
     try:
         output_file = phsig_coh_path(input_file, output_dir, processor)
@@ -646,7 +646,7 @@ def _run_parallel(tasks, worker, max_workers, what):
 def generate_complex_coherence(pairs_file, slc_dir, output_dir, processor='isce3',
                                slc_pattern=None, window_size=5,
                                window_type='triangular', max_workers=1,
-                               subdataset='/data/VV') -> int:
+                               subdataset=None) -> int:
     """Generate complex coherence for every pair in ``pairs_file``."""
     patterns = slc_pattern if slc_pattern else ('*.slc.tif', '*.slc.*', '*.slc')
     output_dir = Path(output_dir)
@@ -695,7 +695,7 @@ def generate_complex_coherence(pairs_file, slc_dir, output_dir, processor='isce3
 def generate_phsig_coherence(input_files, output_dir, processor='isce3',
                              phase_sigma_window=5, gradient_window=5,
                              nlks=1.0, keep_sigma=False, max_workers=1,
-                             subdataset='/data/VV') -> int:
+                             subdataset=None) -> int:
     """Generate the phase-sigma coherence (and optionally the sigma raster)."""
     patterns = input_files if isinstance(input_files, (list, tuple)) else [input_files]
     files: List[str] = []
@@ -726,26 +726,25 @@ def generate_phsig_coherence(input_files, output_dir, processor='isce3',
 
 def generate_coh(processor='isce3', input_files=None, output_dir='.',
                  pairs_file=None, slc_dir=None, slc_pattern=None,
-                 skip_phase_sigma=False, skip_complex_coherence=False,
                  ps_window_size=5, ps_gradient_window=5, ps_nlks=1.0,
                  cc_window_size=5, cc_window_type='triangular',
-                 keep_sigma=False, max_workers=1, subdataset='/data/VV') -> int:
+                 keep_sigma=False, max_workers=1, subdataset=None) -> int:
     """Unified coherence generation: phase-sigma and/or complex coherence.
 
-    The phase-sigma estimator works on interferograms (``input_files``); the
-    complex estimator needs the SLC pairs (``pairs_file`` + ``slc_dir``).
+    Each estimator runs when its inputs are given: the phase-sigma estimator
+    works on interferograms (``input_files``), the complex estimator needs the
+    SLC pairs (``pairs_file`` + ``slc_dir``).  *Which* coherence products are
+    kept is decided by the caller (engine.stages / engine.keep_intermediates),
+    not by flags here.
     """
-    if not skip_phase_sigma and not input_files:
-        logger.error("input_files is required for phase-sigma coherence "
-                     "(or use skip_phase_sigma)")
-        return 1
-    if not skip_complex_coherence and not (pairs_file and slc_dir):
-        logger.error("pairs_file and slc_dir are required for complex coherence "
-                     "(or use skip_complex_coherence)")
+    if not input_files and not (pairs_file and slc_dir):
+        logger.error(
+            "nothing to do: pass input_files (phase-sigma) and/or "
+            "pairs_file+slc_dir (complex coherence)")
         return 1
 
     exit_code = 0
-    if not skip_phase_sigma:
+    if input_files:
         logger.info("--- phase-sigma coherence ---")
         ret = generate_phsig_coherence(
             input_files, output_dir, processor=processor,
@@ -754,7 +753,7 @@ def generate_coh(processor='isce3', input_files=None, output_dir='.',
             subdataset=subdataset)
         exit_code = exit_code or ret
 
-    if not skip_complex_coherence:
+    if pairs_file and slc_dir:
         logger.info("--- complex coherence ---")
         ret = generate_complex_coherence(
             pairs_file, slc_dir, output_dir, processor=processor,

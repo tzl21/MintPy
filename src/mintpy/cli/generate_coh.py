@@ -18,7 +18,7 @@ EXAMPLE = """example:
 
   # complex coherence from SLC pairs (isce3)
   generate_coh.py --processor isce3 --pairs-file ifgram_list.txt --slc-dir ./slc \\
-      --output-dir ./coh --skip-phase-sigma
+      --output-dir ./coh
 
   # both, plus the phase std-dev raster
   generate_coh.py --processor isce3 --input './ifgrams/*/*.int.tif' \\
@@ -43,10 +43,6 @@ def create_parser(subparsers=None):
                         help='Interferometric pairs list for the complex-coherence estimator')
     parser.add_argument('--slc-dir', nargs='+',
                         help='Directory pattern(s) containing SLC files (complex coherence)')
-    parser.add_argument('--slc-pattern', default=None,
-                        help='SLC glob (default: pipeline product pattern then processor raw pattern)')
-    parser.add_argument('--subdataset', default='/data/VV',
-                        help='HDF5 subdataset (default: %(default)s)')
 
     ps = parser.add_argument_group('Phase-sigma coherence options')
     ps.add_argument('--ps-window-size', type=int, default=5,
@@ -68,10 +64,6 @@ def create_parser(subparsers=None):
     proc = parser.add_argument_group('Processing options')
     proc.add_argument('--max-workers', type=int, default=1,
                       help='Number of parallel workers (default: %(default)s)')
-    proc.add_argument('--skip-phase-sigma', action='store_true',
-                      help='Skip the phase-sigma estimator')
-    proc.add_argument('--skip-complex-coherence', action='store_true',
-                      help='Skip the complex-coherence estimator')
     proc.add_argument('-v', '--verbose', action='store_true', help='Verbose logging')
     return parser
 
@@ -79,14 +71,9 @@ def create_parser(subparsers=None):
 def cmd_line_parse(iargs=None):
     parser = create_parser()
     inps = parser.parse_args(args=iargs)
-    if inps.skip_phase_sigma and inps.skip_complex_coherence:
-        parser.error('both estimators are skipped -- nothing to do')
-    if not inps.skip_phase_sigma and not inps.input:
-        parser.error('--input is required for phase-sigma coherence '
-                     '(or use --skip-phase-sigma)')
-    if not inps.skip_complex_coherence and not (inps.pairs_file and inps.slc_dir):
-        parser.error('--pairs-file and --slc-dir are required for complex coherence '
-                     '(or use --skip-complex-coherence)')
+    if not inps.input and not (inps.pairs_file and inps.slc_dir):
+        parser.error('pass --input (phase-sigma) and/or --pairs-file + --slc-dir '
+                     '(complex coherence)')
     return inps
 
 
@@ -99,10 +86,13 @@ def main(iargs=None):
 
     setup_logging(verbose=inps.verbose)
 
-    slc_pattern = inps.slc_pattern
-    if slc_pattern is None:
-        from mintpy.stdproc.utils import naming
-        slc_pattern = list(naming.slc_patterns(inps.processor))
+    slc_pattern = None
+    if inps.slc_dir:
+        from pathlib import Path
+        from mintpy.stdproc.utils.slc_input import (infer_slc_pattern,
+                                                    _walk_slc_files)
+        names = [f.name for d in inps.slc_dir for f in _walk_slc_files(Path(d))]
+        slc_pattern = infer_slc_pattern(names, inps.processor) if names else None
 
     return generate_coh(
         processor=inps.processor,
@@ -111,8 +101,6 @@ def main(iargs=None):
         pairs_file=inps.pairs_file,
         slc_dir=inps.slc_dir,
         slc_pattern=slc_pattern,
-        skip_phase_sigma=inps.skip_phase_sigma,
-        skip_complex_coherence=inps.skip_complex_coherence,
         ps_window_size=inps.ps_window_size,
         ps_gradient_window=inps.ps_gradient_window,
         ps_nlks=inps.ps_nlks,
@@ -120,7 +108,7 @@ def main(iargs=None):
         cc_window_size=inps.cc_window_size,
         cc_window_type=inps.cc_window_type,
         max_workers=inps.max_workers,
-        subdataset=inps.subdataset,
+        subdataset=None,   # auto-detected (/data/[VV,VH,HH], preferring VV)
     )
 
 

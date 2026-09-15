@@ -331,11 +331,15 @@ def _detect_burst_dirs(slc_dirs):
 # Main generation routine
 # ------------------------------------------------------------------------
 def generate_ifgram(pairs_file, slc_dir_patterns, output_dir, processor,
-                    slc_pattern, subdataset, no_verify, only_vrt,
-                    max_workers, verbose,
+                    slc_pattern=None, subdataset=None, no_verify=False,
+                    only_vrt=False, max_workers=1, verbose=False,
                     bbox=None, bbox_buffer=0.0):
     """
     Full VRT + (optional) materialisation pipeline.
+
+    ``slc_pattern`` is inferred from the input files when None; ``subdataset``
+    (HDF5 SLCs) is auto-detected (``/data/[VV,VH,HH]``, preferring VV) when
+    None.
 
     ``bbox`` is an optional WSEN ``(west, south, east, north)`` read-time
     crop (EPSG:4326, degrees): when set, each interferogram is materialised
@@ -349,6 +353,12 @@ def generate_ifgram(pairs_file, slc_dir_patterns, output_dir, processor,
     if not slc_dirs:
         logger.error("No SLC directories found.")
         return
+
+    if slc_pattern is None:
+        from .utils.slc_input import infer_slc_pattern, _walk_slc_files
+        names = [f.name for d in slc_dirs for f in _walk_slc_files(Path(d))]
+        slc_pattern = infer_slc_pattern(names, processor)
+        logger.info("SLC pattern (inferred): %s", slc_pattern)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

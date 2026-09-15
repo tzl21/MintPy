@@ -209,10 +209,11 @@ class BasicExecutor(Slc2ifgExecutor):
         return ['ifgram_list', 'generate_ifgram', 'stitch',
                 'multilook', 'filter', 'unwrap']
 
-    def _run_ifgram_list(self, slc_dir: Path, out_dir: Path,
+    def _run_ifgram_list(self, dates, out_dir: Path, slc_files=None,
                          bbox_cfg: Optional[Tuple[str, float]] = None) -> Path:
         """Eagerly generate the pair list (chain topology depends on it).
 
+        ``slc_files`` is the resolved ``{date: Path}`` map from slc_input.
         ``bbox_cfg`` is the read-time-crop AOI ``(wsen_str, buffer)``: in
         select mode it restricts the quick-coherence screening to the AOI
         window instead of reading the whole SLC (the AOI is already cropped).
@@ -220,7 +221,6 @@ class BasicExecutor(Slc2ifgExecutor):
         from mintpy.stdproc.ifgram_list import (
             filter_date_list,
             generate_pairs,
-            get_date_list,
             write_pair_list,
         )
         from mintpy.stdproc.select_ifgrams import select_pairs
@@ -231,17 +231,18 @@ class BasicExecutor(Slc2ifgExecutor):
         exclude_date = self._opt('slc2ifg.ifgram_list.exclude_date')
         nconn = self._opt_int('slc2ifg.ifgram_list.num_connections')
 
-        dates = get_date_list(str(slc_dir))
-        dates = filter_date_list(dates, start_date=start_date, end_date=end_date,
-                                 exclude_date=exclude_date)
+        dates = filter_date_list(list(dates), start_date=start_date,
+                                 end_date=end_date, exclude_date=exclude_date)
         pair_file = out_dir / 'ifgram_list.txt'
 
         if mode == 'select':
             # k-NN skeleton default for select mode is 3 (vs 5 sequential) —
             # identical to the engine's _select_params
             params = {'num_connections': nconn if nconn is not None else 3,
-                      'slc_dir': str(slc_dir),
-                      'processor': self._opt('slc2ifg.processor', 'isce3')}
+                      'processor': self._opt('slc2ifg.processor', 'isce3'),
+                      'coh_root': str(self.ifg_out_dir)}
+            if slc_files:
+                params['slc_files'] = slc_files
             # typed reads with the same kinds/defaults as the engine (config
             # keys slc2ifg.ifgram_list.select.*), so both backends produce
             # identical selections
@@ -256,15 +257,6 @@ class BasicExecutor(Slc2ifgExecutor):
                     ('temp_baseline_max', 'int'),
                     ('perp_baseline_max', 'float'),
                     ('perp_baseline_file', 'str'),
-                    ('weight_source', 'str'),
-                    ('model_tau_days', 'float'),
-                    ('model_gamma0', 'float'),
-                    ('coh_dir', 'str'),
-                    ('coh_kind', 'str'),
-                    ('coh_variant', 'str'),
-                    ('coh_stat', 'str'),
-                    ('coh_usable_threshold', 'float'),
-                    ('quick_window', 'int'),
                     ('quick_nlks', 'int'),
                     ('quick_max_pixels', 'int'),
                     ('quick_grid', 'int'),
@@ -275,21 +267,12 @@ class BasicExecutor(Slc2ifgExecutor):
                     ('quick_usable_threshold', 'float'),
                     ('min_degree', 'int'),
                     ('max_pairs', 'int'),
-                    ('quality_threshold', 'float'),
                     ('robust', 'bool'),
                     ('verify', 'bool'),
             ]:
-                if key == 'slc_pattern':
-                    continue   # handled below (unified key)
                 val = readers[kind](f'slc2ifg.ifgram_list.select.{key}')
                 if val is not None:
                     params[key] = val
-            # unified SLC pattern (slc2ifg.slc_pattern; legacy
-            # select.slc_pattern as fallback — engine parity)
-            pat = (self._opt('slc2ifg.slc_pattern')
-                   or self._opt('slc2ifg.slc_pattern'))
-            if pat:
-                params['slc_pattern'] = pat
             # AOI: restrict the quick coherence to the bbox+buffer window
             # (only when the SLCs are NOT already cropped on disk, i.e. when
             # the read-time crop is active and bbox_cfg is set).
@@ -341,13 +324,16 @@ class BasicExecutor(Slc2ifgExecutor):
         slc_input = self._opt('slc2ifg.slc_input')
         if not slc_input:
             raise ValueError("slc2ifg.slc_input is required in the config")
-        slc_dir = Path(slc_input)
+        from mintpy.stdproc.utils.slc_input import resolve_slc_input
+        try:
+            self.slc = resolve_slc_input(slc_input, processor=processor)
+        except ValueError as exc:
+            raise ValueError(
+                f"slc2ifg.slc_input={slc_input!r}: {exc}") from exc
 
         # unified ifgram output tree (same layout as the engine)
-        ifg_out = Path(self._opt('slc2ifg.generate_ifgram.output_dir',
-                                  str(work_dir / 'ifgrams')))
-        if not ifg_out.is_absolute():
-            ifg_out = (work_dir / ifg_out).resolve()
+        ifg_out = work_dir / 'ifgrams'
+        self.ifg_out_dir = ifg_out
         ifg_out.mkdir(parents=True, exist_ok=True)
 
         tools = self._tools_enabled()
@@ -361,9 +347,10 @@ class BasicExecutor(Slc2ifgExecutor):
                 "basic executor")
 
         # ---------- crop (optional, transforms the SLC input dir) ----------
-        slc_base = slc_dir
+        slc_state = self.slc
         if 'crop_slc' in tools:
-            slc_base = self._run_crop(slc_dir, work_dir)
+            crop_dir = self._run_crop(slc_state)
+            slc_state = resolve_slc_input(str(crop_dir), processor=processor)
 
         # Read-time crop (default): with crop_slc absent, generate_ifgram
         # reads only the slc2ifg.bbox region of the SLCs — no cropped SLC
@@ -384,18 +371,23 @@ class BasicExecutor(Slc2ifgExecutor):
                 bbox_cfg = (str(wsen), float(buffer))
 
         # ---------- phase 1: per-burst ifgram_list + generate_ifgram -------
-        bursts = self._discover_bursts(slc_base)
-        multi = len(bursts) > 1
+        bursts_all = slc_state.bursts
+        multi = len([b for b in bursts_all if b is not None]) > 1
+        burst_ids = bursts_all if multi else [None]
         logger.info("Mode: %s", "multi-burst" if multi else "single-burst")
 
         pair_files = {}
         ifg_sources: Dict[str, Path] = {}   # (burst, dp) -> ifg path
-        for b in bursts:
+        for b in burst_ids:
             btag = b or 'single'
-            b_slc = slc_base / b if b else slc_base
+            src_burst = b if multi else bursts_all[0]
+            slc_dirs = slc_state.dirs(src_burst)
             b_out = ifg_out / b if b else ifg_out
             b_out.mkdir(parents=True, exist_ok=True)
-            pair_file = self._run_ifgram_list(b_slc, b_out, bbox_cfg)
+            scan_state = self.slc if 'crop_slc' in tools else slc_state
+            dates = scan_state.date_list(src_burst)
+            slc_files = {d: scan_state.file_for(src_burst, d) for d in dates}
+            pair_file = self._run_ifgram_list(dates, b_out, slc_files, bbox_cfg)
             pair_files[btag] = pair_file
             pairs = _read_pairs(pair_file)
             if not pairs:
@@ -410,7 +402,7 @@ class BasicExecutor(Slc2ifgExecutor):
                 continue
 
             # parallel generate_ifgram over date pairs
-            tasks = [(b_slc, b_out, d1, d2, pair_file, processor, bbox_cfg)
+            tasks = [(slc_dirs, b_out, d1, d2, pair_file, processor, bbox_cfg)
                      for d1, d2 in pairs]
             results = self._map_pairs(
                 tasks, self._generate_one, n_workers,
@@ -432,7 +424,7 @@ class BasicExecutor(Slc2ifgExecutor):
                 d1, d2 = dp.split('_')
                 # collect per-burst sources for this pair
                 srcs = [ifg_sources[(bb, dp)]
-                        for bb in bursts if (bb or 'single', dp) in ifg_sources]
+                        for bb in burst_ids if (bb or 'single', dp) in ifg_sources]
                 if len(srcs) < 1:
                     continue
                 out = naming.ifg_path(stitched, d1, d2, 'fullres', processor)
@@ -500,15 +492,17 @@ class BasicExecutor(Slc2ifgExecutor):
             process_single_pair,
         )
         from mintpy.stdproc.utils import naming
-        b_slc, b_out, d1, d2, pair_file, processor, bbox_cfg = task
+        from mintpy.stdproc.utils.slc_input import (infer_slc_pattern,
+                                                    _walk_slc_files)
+        slc_dirs, b_out, d1, d2, pair_file, processor, bbox_cfg = task
+        slc_dirs = [Path(d) for d in slc_dirs]
         try:
-            slc_pattern = (self._opt('slc2ifg.slc_pattern')
-                           or self._opt('slc2ifg.slc_pattern')
-                           or naming.slc_pattern(processor))
-            subdataset = self._opt('slc2ifg.subdataset',
-                                   '/data/VV')
-            slc1 = find_slc_file_by_date([b_slc], d1, slc_pattern, processor)
-            slc2 = find_slc_file_by_date([b_slc], d2, slc_pattern, processor)
+            names = [f.name for d in slc_dirs for f in _walk_slc_files(d)]
+            slc_pattern = infer_slc_pattern(names) if names else (
+                '*.slc' if processor == 'isce2' else '*.slc.*')
+            subdataset = None  # auto-detected from the HDF5 file
+            slc1 = find_slc_file_by_date(slc_dirs, d1, slc_pattern, processor)
+            slc2 = find_slc_file_by_date(slc_dirs, d2, slc_pattern, processor)
             if slc1 is None or slc2 is None:
                 return (d1, d2), False, f"SLC missing for {d1}/{d2}"
             pair_dir = b_out / f'{d1}_{d2}'
@@ -521,7 +515,7 @@ class BasicExecutor(Slc2ifgExecutor):
             if bbox_cfg:
                 from mintpy.stdproc import io as sio
                 wsen, buffer = bbox_cfg
-                window = sio.bbox_to_window(slc1, sio.parse_wsen(wsen), subdataset,
+                window = sio.bbox_to_window(slc1, sio.parse_wsen(wsen), None,
                                             buffer)
                 if window is None:
                     return (d1, d2), False, \
@@ -546,7 +540,7 @@ class BasicExecutor(Slc2ifgExecutor):
                     epsg_utm = epsg
                     break
             ok = stitch_date_pair(list(srcs), out,
-                                  self._opt_tuple('slc2ifg.stitch.out_bounds'),
+                                  self._bbox_tuple(),
                                   overwrite=True, epsg_utm=epsg_utm)
             return ok, '' if ok else 'stitch failed'
         except Exception as e:
@@ -636,10 +630,15 @@ class BasicExecutor(Slc2ifgExecutor):
             coh_cfg = str(self._opt('slc2ifg.unwrap.coh_type', 'auto')
                           or 'auto').lower()
             tools = self._tools_enabled()
-            phsig_path = naming.coh_path(out_base, d1, d2, variant, 'phsig',
-                                         processor)
-            cpx_path = naming.coh_path(out_base, d1, d2, 'fullres', 'cpx',
-                                       processor)
+            from mintpy.stdproc.utils.coherence import find_coh_raster
+            phsig_path = find_coh_raster(out_base, d1, d2,
+                                         prefer_variant=variant,
+                                         prefer_kind='phsig',
+                                         require_kind=True)
+            cpx_path = find_coh_raster(out_base, d1, d2,
+                                       prefer_variant='fullres',
+                                       prefer_kind='cpx',
+                                       require_kind=True)
             if coh_cfg in ('phsig', 'complex', 'none'):
                 coh_type = coh_cfg
             elif coh_cfg == 'auto':
@@ -647,9 +646,9 @@ class BasicExecutor(Slc2ifgExecutor):
                     coh_type = 'phsig'
                 elif 'complex_coh' in tools and variant == 'fullres':
                     coh_type = 'complex'
-                elif cpx_path.exists() and variant == 'fullres':
+                elif cpx_path is not None and variant == 'fullres':
                     coh_type = 'complex'     # reuse an existing cpx raster
-                elif phsig_path.exists():
+                elif phsig_path is not None:
                     coh_type = 'phsig'       # reuse an existing phsig raster
                 else:
                     coh_type = 'none'        # SNAPHU weight 1 (uniform)
@@ -660,20 +659,21 @@ class BasicExecutor(Slc2ifgExecutor):
 
             cor = None
             if coh_type == 'phsig':
-                if not phsig_path.exists():
+                if phsig_path is None:
                     raise ValueError(
-                        f"unwrap: coh_type='phsig' but no phsig raster at "
-                        f"{phsig_path} (run the phsig_coh stage first)")
+                        f"unwrap: coh_type='phsig' but no phsig coherence "
+                        f"raster exists under {out_base / f'{d1}_{d2}'} "
+                        f"(run the phsig_coh stage first)")
                 cor = phsig_path
             elif coh_type == 'complex':
-                if not cpx_path.exists():
+                if cpx_path is None:
                     raise ValueError(
                         f"unwrap: coh_type='complex' but no complex coherence "
-                        f"raster at {cpx_path}")
+                        f"raster exists under {out_base / f'{d1}_{d2}'}")
                 cor = cpx_path
             # 'none' -> cor stays None (uniform weights)
 
-            mask = self._opt('slc2ifg.mask')
+            mask = self._opt('slc2ifg.unwrap.mask_file')
             if not mask:
                 mask = self._opt('mintpy.load.waterMaskFile')
             _unwrap_single(
@@ -719,50 +719,44 @@ class BasicExecutor(Slc2ifgExecutor):
             return fallback
 
     def _discover_bursts(self, slc_dir: Path) -> List[Optional[str]]:
-        import re
-        _BURST_RE = re.compile(r'^t\d+_\d+_iw\d+$')
-        if not slc_dir.is_dir():
+        from mintpy.stdproc.utils.slc_input import resolve_slc_input
+        try:
+            return resolve_slc_input(str(slc_dir)).bursts
+        except ValueError:
             return [None]
-        bursts = sorted(e.name for e in slc_dir.iterdir()
-                        if e.is_dir() and _BURST_RE.match(e.name))
-        if bursts:
-            logger.info("Discovered %d burst(s): %s", len(bursts), bursts)
-            return bursts
-        return [None]
 
-    def _run_crop(self, slc_dir: Path, work_dir: Path) -> Path:
-        """Crop SLCs to bbox, mirroring the engine CropSlcTool: both processors
-        go through the merged ``crop_slc()``, honouring the crop pattern and the
-        ifgram_list date filter (start/end/exclude), and abort on a non-zero
-        exit code."""
+    def _bbox_tuple(self, fallback=None):
+        """``slc2ifg.bbox`` as a ``(W, S, E, N)`` tuple, or None."""
+        return self._opt_tuple('slc2ifg.bbox', fallback)
+
+    def _run_crop(self, slc_state) -> Path:
+        """Crop SLCs to slc2ifg.bbox, mirroring the engine CropSlcTool.
+
+        Inputs come from the resolved slc_input inventory (glob expansion and
+        burst grouping included); burst nesting is derived from the input
+        paths.  The ifgram_list date filter (start/end/exclude) is honoured
+        via an explicit file list.
+        """
         import re as _re
         from mintpy.stdproc import io as sio
         from mintpy.stdproc.crop_slc import crop_slc
-        from mintpy.stdproc.utils import naming
+        from mintpy.stdproc.ifgram_list import parse_exclude_dates
 
         processor = self._opt('slc2ifg.processor', 'isce3')
-        # AOI: unified slc2ifg.bbox; legacy crop_slc.wsen as fallback
-        wsen = self._opt('slc2ifg.bbox') or self._opt('slc2ifg.bbox')
+        wsen = self._opt('slc2ifg.bbox')
         if not wsen:
-            raise ValueError(
-                "crop_slc requires slc2ifg.bbox "
-                "(legacy alias: slc2ifg.bbox)")
-        out_dir = work_dir / 'cropped_slc'
+            raise ValueError("crop_slc requires slc2ifg.bbox")
+        out_dir = self.work_dir / 'cropped_slc'
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # date filter (start/end/exclude) -> explicit --file-list, mirroring the
         # engine's _add_crop_node (non-date files are always kept)
-        from mintpy.stdproc.ifgram_list import parse_exclude_dates
         start_date = self._opt('slc2ifg.ifgram_list.start_date')
         end_date = self._opt('slc2ifg.ifgram_list.end_date')
         ex_dates = parse_exclude_dates(
             self._opt('slc2ifg.ifgram_list.exclude_date'))
-        pattern = (self._opt('slc2ifg.slc_pattern')
-                   or self._opt('slc2ifg.slc_pattern')
-                   or naming.slc_pattern(processor))
-        candidates = sorted(Path(slc_dir).glob(f"**/{pattern}"))
         keep = []
-        for p in candidates:
+        for p in sorted(set(slc_state.files.values())):
             m = _re.search(r'(20\d{6})', p.name)
             if not m:
                 keep.append(str(p))      # non-date assets always kept
@@ -779,30 +773,25 @@ class BasicExecutor(Slc2ifgExecutor):
             raise ValueError(
                 f"No SLC files match the crop date range "
                 f"[{start_date or '-inf'}, {end_date or '+inf'}] "
-                f"excl {ex_dates} under {slc_dir}")
+                f"excl {ex_dates} under {slc_state.root}")
 
-        list_file = work_dir / 'crop_file_list.txt'
+        list_file = self.work_dir / 'crop_file_list.txt'
         list_file.write_text('\n'.join(keep) + '\n')
 
+        multi = len([b for b in slc_state.bursts if b is not None]) > 1
         kwargs = dict(
-            input_dir=str(slc_dir),
+            input_dir=[str(d) for d in slc_state.input_dirs()],
             output_dir=str(out_dir),
             bbox=sio.parse_wsen(str(wsen)),
             processor=processor,
-            pattern=pattern,
-            buffer=self._opt_float(
-                'slc2ifg.bbox_buffer',
-                self._opt_float('slc2ifg.bbox_buffer', 0.0)),
-            prefix=str(self._opt('slc2ifg.crop_slc.prefix', '')),
+            pattern=slc_state.pattern,
+            buffer=self._opt_float('slc2ifg.bbox_buffer', 0.0),
             workers=max(1, int(self._opt_int('engine.max_workers', 1) or 1)),
-            no_skip_existing=self._opt_bool('engine.no_skip_existing', False)
-            or self._opt_bool('engine.no_skip_existing', False),
-            by_burst=self._opt('slc2ifg.crop_slc.by_burst', 'false').lower() in ('true', 'yes', '1'),
+            no_skip_existing=self._opt_bool('engine.no_skip_existing', False),
+            by_burst=True,
+            no_burst_dirs=not multi,
             file_list=str(list_file),
-            no_burst_dirs=True,
         )
-        if self._opt('slc2ifg.geom_dir'):
-            kwargs['geom_dir'] = str(self._opt('slc2ifg.geom_dir'))
 
         ret = crop_slc(**kwargs)
         if ret not in (0, None):

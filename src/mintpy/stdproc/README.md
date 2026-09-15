@@ -32,8 +32,8 @@ with variant `xxx ∈ {fullres, mli, filt_mli, filt}`.
 
 ```bash
 # Coherence-aware connected pair selection (3-NN + half-year/one-year pairs,
-# ranked by quick coherence on downsampled SLCs; see docs/ifgram_selection.md)
-ifgram_list.py --slc ./slc --mode select --select-weight-source coherence \
+# ranked by measured coherence; see docs/ifgram_selection.md)
+ifgram_list.py --slc ./slc --mode select \
     --select-min-degree 2 --select-report selection_report.json
 
 # Generate interferograms from a pairs file
@@ -45,13 +45,14 @@ multilook.py --processor isce3 --input-dir ./ifgrams --pattern '**/*.int.tif' \
     --output-dir ./ml --lks-y 4 --lks-x 4
 filter.py --processor isce3 --filter-type goldstein --input-dir ./ml \
     --pattern '**/*.int.tif' --output-dir ./filtered
-generate_coh_phsig.py --processor isce3 --input './filtered/**/*.int.tif' \
+generate_coh.py --processor isce3 --input './filtered/**/*.int.tif' \
     --output-dir ./filtered
 unwrap_ifgram.py --processor isce3 --ifg-dir ./filtered --cor-dir ./filtered \
     --output-dir ./unwrapped --ifg-pattern '**/*.int.tif' \
     --cor-pattern '**/*.phsig.coh.tif'
 
-# Stitch multi-burst products (full union extent by default)
+# Stitch multi-burst products (file types auto-detected; full union extent
+# by default, or clipped to --bbox)
 stitch.py --processor isce3 --burst-dir ./ifgrams --output-dir ./stitched
 ```
 
@@ -62,5 +63,12 @@ resume.
 
 MintPy-style config files (no section header; a virtual `[slc2ifg]` section
 is added internally). The default template lives at
-`src/insarflow/slc2ifg/template/slc2ifg.cfg`. The engine reads the same
-config format (see `insarflow.engine.config`).
+`src/mintpy/stdproc/template/slc2ifg.cfg`; the engine reads the same format
+(see `mintpy.stdproc.engine.config`).
+
+`slc2ifg.slc_input` accepts a path **or a glob** (e.g. `xxx/y*/` for a flat
+tree, `xxx/t*/*/` for a multi-burst tree — the burst id is extracted
+automatically), and the SLC filename pattern is inferred from the files
+found. The HDF5 subdataset is auto-detected (`/data/[VV,VH,HH]`, preferring
+VV), and coherence rasters are auto-discovered under `<work_dir>/ifgrams`
+(kind/variant inferred from the filename).

@@ -311,7 +311,7 @@ def complex_coh_tiled(
     processor: str,
     tile_workers: int = 1,
     gpu: bool = False,
-    subdataset: str = '/data/VV',
+    subdataset: Optional[str] = None,
     window_type: str = 'triangular',
     crop_window: Optional[Tuple[int, int, int, int]] = None,
 ) -> str:

@@ -27,11 +27,8 @@ from mintpy.stdproc.engine.tool import (
 )
 
 #: complex_coh / phsig_coh share the slc2ifg.generate_coh.* config section
+#: (the HDF5 subdataset is auto-detected; there is no SLC pattern key).
 _GENERATE_COH_PARAMS = [
-    ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.slc_pattern'),
-    ParamSpec('subdataset', cfg='slc2ifg.subdataset',
-              default='/data/VV'),
     ParamSpec('window_size', cfg='slc2ifg.generate_coh.cc_window_size',
               kind='int', default=5),
     ParamSpec('window_type', cfg='slc2ifg.generate_coh.cc_window_type',

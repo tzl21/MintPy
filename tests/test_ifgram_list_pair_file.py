@@ -151,10 +151,6 @@ def test_entry_mode_honours_pair_file(tmp_path):
     for d in ('20220105', '20220117', '20220210'):
         (slc / d).mkdir(parents=True)
         (slc / d / f't124_264305_iw2_{d}.h5').touch()
-    inp = tmp_path / 'products'
-    inp.mkdir()
-    (inp / 'ifgram_list.txt').write_text(
-        '20220105-20220117\n20220105-20220210\n20220117-20220210\n')
     pf = tmp_path / 'pairs.txt'
     pf.write_text('20220105-20220210\n')
     cfg = tmp_path / 'mini.cfg'
@@ -162,8 +158,6 @@ def test_entry_mode_honours_pair_file(tmp_path):
         f'slc2ifg.work_dir = {tmp_path}\n'
         f'slc2ifg.slc_input = {slc}\n'
         'slc2ifg.processor = isce3\n'
-        'slc2ifg.slc_pattern = **/t*.h5\n'
-        f'engine.input_dir = {inp}\n'
         f'slc2ifg.ifgram_list.pair_file = {pf}\n'
         'engine.stages = complex_coh\n'      # no generate_ifgram -> entry mode
         'engine.gpu = false\n')

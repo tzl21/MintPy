@@ -170,58 +170,52 @@ Example (60 dates, 12-day cycle, defaults): 174 k-NN pairs + ~148
 window pairs = **322 candidates** (a 60-date stack has 1770 possible
 pairs, so this already cuts the search space ~5.5×).
 
-### 3.3 Step ② — weighting (`weight_source`)
+### 3.3 Step ② — weighting (measured coherence)
 
-Every candidate gets a scalar quality `w` (larger = better):
+Every candidate gets a scalar quality `w` (larger = better) from **measured
+coherence**:
 
 | source | formula / statistic | prerequisites |
 |---|---|---|
-| `model` (default) | `w = γ0 · exp(−Δt/τ)` (+ optional perp factor) | date list only |
-| `coherence` + `coh_dir` | statistic of an existing coherence raster | a pilot run's products |
-| `coherence` (no `coh_dir`) | complex coherence on the **AOI window** of the SLCs (or a whole-scene grid sample) | SLC directory |
-| `mixed` | measured where available, `model` fills gaps | SLCs or rasters + model |
+| coherence rasters | statistic of an existing coherence raster | coherence products under `<work_dir>/ifgrams` |
+| quick coherence | complex coherence on the **AOI window** of the SLCs (or a whole-scene grid sample) | SLC directory |
 
-**`model` details** — `model_tau_days` (default **90**) is the
-temporal-decorrelation time constant, `model_gamma0` (default **1.0**)
-the coherence at zero baseline. Example weights with τ = 90 d:
-`Δt = 12 d → 0.875`, `Δt = 24 d → 0.766`, `Δt = 360 d → 0.018`. The
-model therefore strongly prefers short baselines — good for a cold
-start, but it cannot *know* that a particular annual pair is actually
-coherent; that requires the measured sources.
+Existing rasters are preferred: for every candidate pair the code looks for
+`{ifgram_root}/{date1}_{date2}/*.coh.tif` (kind and variant inferred from
+the filename, `phsig` > `cpx`, `filt_mli` > `filt` > `mli` > `fullres`).
+When no candidate has a raster, the on-the-fly quick coherence is used
+instead. A missing raster yields weight 0 (warned in the log).
 
-**`coherence` raster details** — looks up
-`{coh_dir}/{date1}_{date2}/{variant}_{kind}.coh[.tif]`, e.g.
-`filt_mli.phsig.coh.tif` (`coh_variant` default `filt_mli`,
-`coh_kind` default `phsig` — the products of the standard engine chain).
-A missing raster yields weight 0 in `coherence` mode, or a model
-fallback in `mixed` mode (warned in the log).
+**coherence raster details** — the standard engine chain writes e.g.
+`filt_mli.phsig.coh.tif`; there is no `coh_dir` / `coh_kind` /
+`coh_variant` configuration anymore.
 
-**`coherence` quick (on-the-fly) details** — the "screening" source.
+**coherence quick (on-the-fly) details** — the "screening" source.
 With `slc2ifg.bbox` (+ `slc2ifg.bbox_buffer`) set, only that window of each
-SLC is read (`crop_slc_geo.bbox_to_window`), block-averaged by `quick_nlks`
+SLC is read (`io.bbox_to_window`), block-averaged by `quick_nlks`
 (default **1** = full window resolution: the AOI is already cropped, so
 downsampling it further buys little); `quick_max_pixels` (default
 1048576) caps the window and raises the factor automatically for very
 large AOIs. Without a bbox, each SLC is read as a regular
 `quick_grid`×`quick_grid` grid of `quick_block`×`quick_block` sample
 windows (0.04% of the pixels, no whole-image read) instead.
-Either way the complex correlation magnitude is computed with a
-`quick_window`×`quick_window` boxcar (default 5), corrected for the
-magnitude bias (`quick_debias`, default on; Touzi 1999 with
-`L = (factor·window)²` effective looks:
+Either way the complex correlation magnitude is computed with a fixed
+8×8 boxcar, corrected for the magnitude bias (`quick_debias`, default on;
+Touzi 1999 with `L = (factor·window)²` effective looks:
 `γ ≈ (γ̂ − 1/(2L)) / (1 − 1/(2L))`), and aggregated to one scalar. Cost:
 milliseconds per pair — cheap enough to screen *all* candidates;
 `quick_max_workers > 1` parallelises the per-pair screening with a
 thread pool (the sampled SLCs are loaded once up front).
 
-**Aggregation statistic** (`coh_stat` / `quick_stat`, default `mean`):
+**Aggregation statistic** (`quick_stat`, default `mean`, used for both
+sources):
 
 | stat | definition | meaning |
 |---|---|---|
 | `mean` | mean over valid (γ > 0) pixels | average coherence; sensitive to large incoherent areas |
 | `median` | median over valid pixels | robust to water/shadow outliers |
-| `usable_frac` | fraction of pixels with γ ≥ `coh_usable_threshold` (default 0.3) | proxy for the **unwrappable area**; good for sparse AOIs |
-| `fisher` | mean of `γ²/(1−γ²)` | the information weight from the theory; unbounded (≥ 0), so `quality_threshold` is in fisher units |
+| `usable_frac` | fraction of pixels with γ ≥ `quick_usable_threshold` (default 0.3) | proxy for the **unwrappable area**; good for sparse AOIs |
+| `fisher` | mean of `γ²/(1−γ²)` | the information weight from the theory; unbounded (≥ 0) |
 
 ### 3.4 Step ③ — selection (`select_ifgrams`)
 
@@ -264,11 +258,6 @@ iterating until no bridge remains or no replacement exists. Result:
 with `min_degree = 2` a degree-2 node can still sit on a bridge; this
 phase removes that.
 
-**`quality_threshold`** (default 0): a floor applied to *augmentation*
-(phases B, C, D). The spanning tree (phase A) may still use
-below-threshold edges, because connectivity is a hard guarantee — a
-warning is logged when that happens.
-
 ### 3.5 Step ④ — verification, report and diagram
 
 * Connectivity is re-checked on the final selection (union-find).
@@ -280,7 +269,8 @@ warning is logged when that happens.
   weight statistics (sum, mean, min/median), degree statistics
   (`min_degree_actual`, `max_degree_actual`, `degree_unmet`),
   verification (`connected`, `rank`, `full_rank`), the tree edge list
-  (`tree_edges`, for the diagram), `weight_source` and a full parameter
+  (`tree_edges`, for the diagram), the weight source actually used
+  (`coherence_rasters` or `quick_coherence`) and a full parameter
   snapshot. The engine also logs a one-line summary during graph
   building.
 * With `select.dot` set, the selected network is written as GraphViz
@@ -294,8 +284,7 @@ warning is logged when that happens.
 
 ```ini
 slc2ifg.ifgram_list.mode = select
-slc2ifg.ifgram_list.select.weight_source = coherence   # quick coherence on downsampled SLCs
-slc2ifg.ifgram_list.select.min_degree = 2
+slc2ifg.ifgram_list.select.min_degree = 2              # weights: measured coherence
 slc2ifg.ifgram_list.select.robust = true
 # defaults already provide: num_connections=3, annual_windows=auto
 ```
@@ -308,7 +297,6 @@ fully-connected-on-downsampled-SLCs idea):
 
 ```ini
 slc2ifg.ifgram_list.mode = select
-slc2ifg.ifgram_list.select.weight_source = coherence
 slc2ifg.ifgram_list.num_connections = 0               # no k-NN skeleton
 slc2ifg.ifgram_list.select.annual_windows = none      # no window pairs
 slc2ifg.ifgram_list.select.temp_baseline_max = 48     # all pairs <= 48 days
@@ -329,22 +317,19 @@ window-pair rule.)
 | `annual_windows` | `auto` | `auto` derives half-year / one-year windows from the repeat cycle; explicit `center:tol` day-pair list (comma-separated) overrides; `none`/`off`/`0`/empty disables the rule. |
 | `temp_baseline_max` | — | include all pairs with `Δt ≤` this many days. |
 | `perp_baseline_max` / `perp_baseline_file` | — | perpendicular-baseline cap (m) + `date bperp` file. |
-| `weight_source` | `model` | `model` / `coherence` / `mixed`. |
-| `model_tau_days` / `model_gamma0` | `90` / `1.0` | temporal-decorrelation model. |
-| `coh_dir` / `coh_kind` / `coh_variant` | — / `phsig` / `filt_mli` | existing-coherence source. |
-| `coh_stat` / `coh_usable_threshold` | `mean` / `0.3` | raster aggregation. |
-| `quick_window` / `quick_debias` | `5` / `true` | on-the-fly coherence boxcar / Touzi bias correction. |
+| `quick_debias` | `true` | Touzi bias correction for the on-the-fly coherence. |
 | `quick_nlks` / `quick_max_pixels` | `1` / `1048576` | block-mean downsampling of the `slc2ifg.bbox` window + size cap (bbox path). |
 | `quick_grid` / `quick_block` | `12` / `16` | whole-scene grid sampling density (no-bbox path). |
 | `quick_max_workers` | `1` | threads for the per-pair quick-coherence screening. |
-| `quick_stat` / `quick_usable_threshold` | `mean` / `0.3` | quick aggregation. |
+| `quick_stat` / `quick_usable_threshold` | `mean` / `0.3` | coherence aggregation statistic / usable-fraction threshold. |
 | `min_degree` | `2` | minimum interferograms per date (0/1 = spanning tree only). |
 | `max_pairs` | — | global edge budget. |
-| `quality_threshold` | `0` | augmentation floor on `w`. |
 | `robust` | `false` | bridge repair (2-edge robustness). |
 | `verify` | `true` | rank/connectivity verification. |
 | `report` | — | JSON report path. |
 | `dot` | — | GraphViz DOT path (network diagram). |
+
+The coherence boxcar window is fixed at 8 pixels (not configurable).
 
 ### 3.8 Edge cases and failure modes
 
@@ -353,12 +338,11 @@ window-pair rule.)
 * Candidate graph disconnected → `ValueError` (no connected subset
   exists) with relaxation hints.
 * Candidate count `< N−1` → `ValueError` (not enough edges to span).
-* Missing SLC file / coherence raster → weight `None` → treated as 0
-  (or model fallback in `mixed`), warned in the log.
+* Missing SLC file / coherence raster → weight `None` → treated as 0,
+  warned in the log.
 * Unknown date in a pair → `ValueError`.
-* High `quality_threshold` → tree still guarantees connectivity
-  (below-threshold edges allowed with a warning); `min_degree` may be
-  left unmet (warned + listed in the report).
+* `min_degree` may be left unmet when the candidate set is too sparse
+  (warned + listed in the report); connectivity is still guaranteed.
 * Reproducibility: the sort is `(−w, d1, d2)`, so equal weights give a
   deterministic outcome.
 
@@ -418,10 +402,9 @@ Standalone CLI:
 
 | situation | recommendation |
 |---|---|
-| production SBAS, SLCs available | `select`, `weight_source = coherence` (quick), `min_degree = 2`, `robust = true` |
-| no SLCs yet / cold start / config test | `select`, `weight_source = model` |
+| production SBAS, SLCs available | `select`, `min_degree = 2`, `robust = true` (quick coherence) |
 | tiny stack (N ≤ ~15), quick pilot | `sequential` k=3–5, or `reference` if targets are very stable |
-| reuse a previous run's coherence | `select`, `weight_source = coherence`, `coh_dir = <previous ifgrams>` |
+| reuse a previous run's coherence | `select` — coherence rasters under `<work_dir>/ifgrams` are used automatically |
 | strict compute budget (unwrap time) | `select` + `max_pairs` |
 | exactly reproduce an old k-NN network | `sequential` |
 | exactly reproduce a curated/old pair list | `file` + `pair_file = <list.txt>` |

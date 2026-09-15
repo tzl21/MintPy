@@ -178,11 +178,11 @@ def cmd_line_parse(iargs=None):
     parser = create_parser()
     inps = parser.parse_args(args=iargs)
     if inps.pattern is None:
-        inps.pattern = "**/*.int.tif" if inps.processor == "isce3" else "**/*.int"
+        inps.pattern = "**/*.int.tif"
     if getattr(inps, "cor_pattern", None) is None:
-        inps.cor_pattern = "**/*.phsig.coh.tif" if inps.processor == "isce3" else "**/*.phsig.coh"
+        inps.cor_pattern = "**/*.phsig.coh.tif"
     if getattr(inps, "conncomp_pattern", None) is None:
-        inps.conncomp_pattern = "**/*.unw.conncomp.tif" if inps.processor == "isce3" else "**/*.unw.conncomp"
+        inps.conncomp_pattern = "**/*.unw.conncomp.tif"
     if not inps.file and not inps.input_dir:
         raise SystemExit('ERROR: either input file(s) or --input-dir is required')
     return inps

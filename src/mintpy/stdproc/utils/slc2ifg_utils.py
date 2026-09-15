@@ -767,7 +767,8 @@ def open_gdal(file_path: Union[str, Path], subdataset: Optional[str] = None):
     file_path : str or Path
         Path to the raster (GeoTIFF / ENVI / HDF5 ...).
     subdataset : str, optional
-        HDF5 subdataset path, e.g. ``/data/VV`` (default: open the root).
+        HDF5 subdataset path, e.g. ``/data/VV``; auto-detected (preferring VV)
+        when omitted.
 
     Returns
     -------
@@ -776,6 +777,12 @@ def open_gdal(file_path: Union[str, Path], subdataset: Optional[str] = None):
     from osgeo import gdal as gdal_mod
 
     path = str(file_path)
+    if is_hdf5_file(path) and not subdataset:
+        try:
+            from mintpy.stdproc.io import detect_hdf5_subdataset
+            subdataset = detect_hdf5_subdataset(path)
+        except Exception:
+            subdataset = None
     if subdataset and is_hdf5_file(path):
         path = f'NETCDF:"{path}":"//{str(subdataset).lstrip("/")}"'
     return gdal_mod.Open(path, gdal_mod.GA_ReadOnly)
