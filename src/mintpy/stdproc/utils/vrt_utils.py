@@ -50,7 +50,10 @@ def _format_nc_filename(filepath: Union[str, Path], subdataset: Optional[str] = 
             except Exception:
                 subdataset = None
         if subdataset:
-            return f'HDF5:"{filepath}":{subdataset}'
+            # GDAL's HDF5 driver needs the object path introduced by '//'
+            # (e.g. HDF5:"f.h5"://data/VV); a single '/' is rejected with
+            # "No such file or directory".
+            return f'HDF5:"{filepath}"://{str(subdataset).lstrip("/")}'
     return str(filepath)
 
 
