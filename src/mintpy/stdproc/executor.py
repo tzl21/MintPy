@@ -20,7 +20,7 @@ Two interchangeable executors run the SAME slc2ifg processing functions
   imported at run time.
 
 :func:`get_executor` selects the backend from the config key
-``mintpy.slc2ifg.engine`` (``none | insarflow | auto``); ``auto`` uses the
+``slc2ifg.engine`` (``none | insarflow | auto``); ``auto`` uses the
 engine when importable, otherwise falls back to the basic executor — MintPy
 can always run the full slc2ifg workflow.
 """
@@ -49,12 +49,12 @@ class Slc2ifgExecutor(ABC):
 
 
 def get_executor(cfg: dict) -> Slc2ifgExecutor:
-    """Pick the execution backend from ``mintpy.slc2ifg.engine``.
+    """Pick the execution backend from ``slc2ifg.engine``.
 
     Values: ``none`` (basic only), ``insarflow`` (engine required),
     ``auto`` (engine when importable, else basic).
     """
-    engine_cfg = str(cfg.get('mintpy.slc2ifg.engine', 'auto')).lower()
+    engine_cfg = str(cfg.get('slc2ifg.engine', 'auto')).lower()
     if engine_cfg == 'none':
         return BasicExecutor()
 
@@ -67,9 +67,9 @@ def get_executor(cfg: dict) -> Slc2ifgExecutor:
     if importlib.util.find_spec('dask') is None:
         logger.warning(
             "dask not found — falling back to the basic executor "
-            "(set mintpy.slc2ifg.engine = none to silence this warning)")
+            "(set slc2ifg.engine = none to silence this warning)")
         return BasicExecutor()
-    logger.info("using the engine executor (set mintpy.slc2ifg.engine = none "
+    logger.info("using the engine executor (set slc2ifg.engine = none "
                 "for the basic executor)")
     return EngineExecutor()
 
@@ -179,7 +179,7 @@ class BasicExecutor(Slc2ifgExecutor):
         """Effective number of looks for phase-sigma / SNAPHU weighting.
 
         Mirrors the engine's ``_ps_nlks``: explicit
-        ``slc2ifg.generate_coh.ps_nlks`` wins; otherwise the multilook
+        ``slc2ifg.nlooks`` wins; otherwise the multilook
         product's ``lks_y * lks_x`` when multilook runs; else 1.0.
         """
         default = fallback
@@ -187,7 +187,7 @@ class BasicExecutor(Slc2ifgExecutor):
             lks_y = self._opt_int('slc2ifg.multilook.lks_y', 1) or 1
             lks_x = self._opt_int('slc2ifg.multilook.lks_x', 1) or 1
             default = float(lks_y * lks_x)
-        explicit = self._opt_float('slc2ifg.generate_coh.ps_nlks')
+        explicit = self._opt_float('slc2ifg.nlooks')
         return explicit if explicit else default
 
     def _parallel_ctx(self, n_items: int, max_parallel_num: int = 8):
@@ -287,16 +287,16 @@ class BasicExecutor(Slc2ifgExecutor):
             # unified SLC pattern (slc2ifg.slc_pattern; legacy
             # select.slc_pattern as fallback — engine parity)
             pat = (self._opt('slc2ifg.slc_pattern')
-                   or self._opt('slc2ifg.ifgram_list.select.slc_pattern'))
+                   or self._opt('slc2ifg.slc_pattern'))
             if pat:
                 params['slc_pattern'] = pat
             # AOI: restrict the quick coherence to the bbox+buffer window
             # (only when the SLCs are NOT already cropped on disk, i.e. when
             # the read-time crop is active and bbox_cfg is set).
             if bbox_cfg:
-                from mintpy.stdproc.crop_slc_geo import parse_wsen
+                from mintpy.stdproc import io as sio
                 wsen, buffer = bbox_cfg
-                params['bbox'] = parse_wsen(wsen)
+                params['bbox'] = sio.parse_wsen(wsen)
                 params['bbox_buffer'] = float(buffer)
             # report / dot: resolve relative paths against the work dir
             # (mirrors the engine's _select_params)
@@ -357,7 +357,7 @@ class BasicExecutor(Slc2ifgExecutor):
         if 'complex_coh' in tools:
             logger.warning(
                 "complex_coh is only supported by the engine backend "
-                "(mintpy.slc2ifg.engine = insarflow) — skipping it in the "
+                "(slc2ifg.engine = insarflow) — skipping it in the "
                 "basic executor")
 
         # ---------- crop (optional, transforms the SLC input dir) ----------
@@ -371,7 +371,7 @@ class BasicExecutor(Slc2ifgExecutor):
         # this mode requires the crop_slc stage.
         bbox_cfg = None
         if 'crop_slc' not in tools:
-            wsen = self._opt('slc2ifg.bbox') or self._opt('slc2ifg.crop_slc.wsen')
+            wsen = self._opt('slc2ifg.bbox') or self._opt('slc2ifg.bbox')
             if wsen:
                 if processor == 'isce2':
                     raise ValueError(
@@ -380,7 +380,7 @@ class BasicExecutor(Slc2ifgExecutor):
                         "'crop_slc' stage instead")
                 buffer = self._opt_float(
                     'slc2ifg.bbox_buffer',
-                    self._opt_float('slc2ifg.crop_slc.buffer', 0.0))
+                    self._opt_float('slc2ifg.bbox_buffer', 0.0))
                 bbox_cfg = (str(wsen), float(buffer))
 
         # ---------- phase 1: per-burst ifgram_list + generate_ifgram -------
@@ -503,9 +503,9 @@ class BasicExecutor(Slc2ifgExecutor):
         b_slc, b_out, d1, d2, pair_file, processor, bbox_cfg = task
         try:
             slc_pattern = (self._opt('slc2ifg.slc_pattern')
-                           or self._opt('slc2ifg.generate_ifgram.slc_pattern')
+                           or self._opt('slc2ifg.slc_pattern')
                            or naming.slc_pattern(processor))
-            subdataset = self._opt('slc2ifg.generate_ifgram.subdataset',
+            subdataset = self._opt('slc2ifg.subdataset',
                                    '/data/VV')
             slc1 = find_slc_file_by_date([b_slc], d1, slc_pattern, processor)
             slc2 = find_slc_file_by_date([b_slc], d2, slc_pattern, processor)
@@ -519,10 +519,10 @@ class BasicExecutor(Slc2ifgExecutor):
             # Read-time crop: map the bbox to this pair's SLC pixel window
             window = None
             if bbox_cfg:
-                from mintpy.stdproc.crop_slc_geo import bbox_to_window, parse_wsen
+                from mintpy.stdproc import io as sio
                 wsen, buffer = bbox_cfg
-                window = bbox_to_window(slc1, parse_wsen(wsen), subdataset,
-                                        buffer)
+                window = sio.bbox_to_window(slc1, sio.parse_wsen(wsen), subdataset,
+                                            buffer)
                 if window is None:
                     return (d1, d2), False, \
                         f"bbox {wsen} does not intersect SLC {slc1}"
@@ -589,31 +589,35 @@ class BasicExecutor(Slc2ifgExecutor):
             return (d1, d2), False, str(e)
 
     def _stage_phsig_coh(self, task):
-        from mintpy.stdproc.generate_coh_phsig import (
-            _write_band,
+        from mintpy.stdproc.generate_coh import (
+            estimate_phsig_correlation,
             read_complex_image,
+            write_coherence_image,
         )
         from mintpy.stdproc.utils import naming
         base, out_base, variant, d1, d2, processor = task
+        keep_sigma = self._opt_bool('slc2ifg.generate_coh.keep_sigma', False)
         try:
             in_path = naming.ifg_path(base, d1, d2, variant, processor)
             out_path = naming.coh_path(out_base, d1, d2, variant, 'phsig',
                                        processor)
-            if out_path.exists():
+            sig_path = naming.sigma_path(out_base, d1, d2, variant, processor)
+            if out_path.exists() and (not keep_sigma or sig_path.exists()):
                 return (d1, d2), True, 'exists'
             ifg, meta = read_complex_image(str(in_path), processor)
-            from mintpy.stdproc.generate_coh_phsig import (
-                estimate_phsig_correlation,
-            )
-            coh = estimate_phsig_correlation(
+            coh, sigma = estimate_phsig_correlation(
                 ifg,
                 ps_win=self._opt_int('slc2ifg.generate_coh.ps_window_size', 5),
                 grad_win=self._opt_int(
                     'slc2ifg.generate_coh.ps_gradient_window', 5),
                 nlks=self._ps_nlks(),
+                return_sigma=keep_sigma,
             )
-            _write_band(str(out_path), coh, meta, processor,
-                        'phase-sigma correlation')
+            write_coherence_image(str(out_path), coh, meta, processor,
+                                  'phase-sigma correlation')
+            if keep_sigma:
+                write_coherence_image(str(sig_path), sigma, meta, processor,
+                                      'phase standard deviation')
             return (d1, d2), True, ''
         except Exception as e:
             return (d1, d2), False, str(e)
@@ -669,14 +673,14 @@ class BasicExecutor(Slc2ifgExecutor):
                 cor = cpx_path
             # 'none' -> cor stays None (uniform weights)
 
-            mask = self._opt('slc2ifg.unwrap.snaphu.mask_file')
+            mask = self._opt('slc2ifg.mask')
             if not mask:
                 mask = self._opt('mintpy.load.waterMaskFile')
             _unwrap_single(
                 ifg_path=Path(in_path),
                 cor_path=Path(cor) if cor else None,
-                nlooks=(self._opt_float('slc2ifg.unwrap.snaphu.nlooks')
-                        or self._opt_float('slc2ifg.unwrap.nlooks')
+                nlooks=(self._opt_float('slc2ifg.nlooks')
+                        or self._opt_float('slc2ifg.nlooks')
                         or self._ps_nlks()),
                 output_dir=unw_root,
                 processor=processor,
@@ -727,24 +731,26 @@ class BasicExecutor(Slc2ifgExecutor):
         return [None]
 
     def _run_crop(self, slc_dir: Path, work_dir: Path) -> Path:
-        """Crop SLCs to bbox, mirroring the engine CropSlcTool: dispatch on
-        processor (isce2 -> radar / isce3 -> geo), honour the crop pattern
-        and the ifgram_list date filter (start/end/exclude), and abort on a
-        non-zero exit code."""
+        """Crop SLCs to bbox, mirroring the engine CropSlcTool: both processors
+        go through the merged ``crop_slc()``, honouring the crop pattern and the
+        ifgram_list date filter (start/end/exclude), and abort on a non-zero
+        exit code."""
         import re as _re
+        from mintpy.stdproc import io as sio
+        from mintpy.stdproc.crop_slc import crop_slc
         from mintpy.stdproc.utils import naming
 
         processor = self._opt('slc2ifg.processor', 'isce3')
         # AOI: unified slc2ifg.bbox; legacy crop_slc.wsen as fallback
-        wsen = self._opt('slc2ifg.bbox') or self._opt('slc2ifg.crop_slc.wsen')
+        wsen = self._opt('slc2ifg.bbox') or self._opt('slc2ifg.bbox')
         if not wsen:
             raise ValueError(
                 "crop_slc requires slc2ifg.bbox "
-                "(legacy alias: slc2ifg.crop_slc.wsen)")
+                "(legacy alias: slc2ifg.bbox)")
         out_dir = work_dir / 'cropped_slc'
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # date filter (start/end/exclude) -> --file-list, mirroring the
+        # date filter (start/end/exclude) -> explicit --file-list, mirroring the
         # engine's _add_crop_node (non-date files are always kept)
         from mintpy.stdproc.ifgram_list import parse_exclude_dates
         start_date = self._opt('slc2ifg.ifgram_list.start_date')
@@ -752,7 +758,7 @@ class BasicExecutor(Slc2ifgExecutor):
         ex_dates = parse_exclude_dates(
             self._opt('slc2ifg.ifgram_list.exclude_date'))
         pattern = (self._opt('slc2ifg.slc_pattern')
-                   or self._opt('slc2ifg.crop_slc.pattern')
+                   or self._opt('slc2ifg.slc_pattern')
                    or naming.slc_pattern(processor))
         candidates = sorted(Path(slc_dir).glob(f"**/{pattern}"))
         keep = []
@@ -778,35 +784,27 @@ class BasicExecutor(Slc2ifgExecutor):
         list_file = work_dir / 'crop_file_list.txt'
         list_file.write_text('\n'.join(keep) + '\n')
 
-        wsen_tokens = [x for x in _re.split(r'[\s,]+', str(wsen)) if x.strip()]
-        if len(wsen_tokens) != 4:
-            raise ValueError(
-                f"slc2ifg.bbox must be 4 numbers (W S E N), got {wsen!r}")
-        args_list = [
-            '--input-dir', str(slc_dir),
-            '--file-list', str(list_file),
-            '--output-dir', str(out_dir),
-            '--wsen'] + wsen_tokens + [
-            '--buffer', str(self._opt_float(
+        kwargs = dict(
+            input_dir=str(slc_dir),
+            output_dir=str(out_dir),
+            bbox=sio.parse_wsen(str(wsen)),
+            processor=processor,
+            pattern=pattern,
+            buffer=self._opt_float(
                 'slc2ifg.bbox_buffer',
-                self._opt_float('slc2ifg.crop_slc.buffer', 0.0))),
-            '--prefix', str(self._opt('slc2ifg.crop_slc.prefix', '')),
-            '--max-workers', str(self._opt_int('engine.max_workers', 1) or 1),
-        ]
-        if self._opt('slc2ifg.crop_slc.geom_dir'):
-            args_list += ['--geom-dir', str(self._opt('slc2ifg.crop_slc.geom_dir'))]
-        if self._opt('slc2ifg.crop_slc.by_burst', 'false').lower() in ('true', 'yes', '1'):
-            args_list.append('--by-burst')
-        args_list.append('--no-burst-dirs')
+                self._opt_float('slc2ifg.bbox_buffer', 0.0)),
+            prefix=str(self._opt('slc2ifg.crop_slc.prefix', '')),
+            workers=max(1, int(self._opt_int('engine.max_workers', 1) or 1)),
+            no_skip_existing=self._opt_bool('engine.no_skip_existing', False)
+            or self._opt_bool('engine.no_skip_existing', False),
+            by_burst=self._opt('slc2ifg.crop_slc.by_burst', 'false').lower() in ('true', 'yes', '1'),
+            file_list=str(list_file),
+            no_burst_dirs=True,
+        )
+        if self._opt('slc2ifg.geom_dir'):
+            kwargs['geom_dir'] = str(self._opt('slc2ifg.geom_dir'))
 
-        if processor == 'isce2':
-            from mintpy.stdproc.crop_slc_rdr import main as rdr_main
-            from mintpy.stdproc.crop_slc_rdr import parse_arguments as rdr_parse
-            ret = rdr_main(rdr_parse(args_list))
-        else:
-            from mintpy.stdproc.crop_slc_geo import main as geo_main
-            from mintpy.stdproc.crop_slc_geo import parse_arguments as geo_parse
-            ret = geo_main(geo_parse(args_list))
+        ret = crop_slc(**kwargs)
         if ret not in (0, None):
             raise RuntimeError(f"crop_slc failed with exit code {ret}")
         return out_dir
@@ -831,4 +829,23 @@ class EngineExecutor(Slc2ifgExecutor):
                 "(run via `mintpy slc2ifg <cfg>` — basic executor is used "
                 "for in-memory dict configs)")
         engine_cfg = load_engine_config(str(config_file))
-        Engine(engine_cfg).run()
+
+        # command line overrides from `mintpy slc2ifg` / `slc2ifg.py`
+        ov = cfg.get('_overrides') or {}
+        if ov.get('scheduler'):
+            engine_cfg.scheduler = ov['scheduler']
+        if ov.get('max_workers'):
+            engine_cfg.max_workers = int(ov['max_workers'])
+        if ov.get('gpu'):
+            engine_cfg.gpu = ov['gpu']
+        if ov.get('keep_intermediates'):
+            engine_cfg.keep_intermediates = ov['keep_intermediates']
+
+        engine = Engine(engine_cfg)
+        dry_run = bool(ov.get('dry_run'))
+        if ov.get('restore'):
+            engine.restore(dry_run=dry_run)
+        elif ov.get('tool'):
+            engine.run_tool(ov['tool'], dry_run=dry_run)
+        else:
+            engine.run(dry_run=dry_run)

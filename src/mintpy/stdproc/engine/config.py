@@ -282,6 +282,8 @@ class EngineConfig:
 def load_engine_config(config_file: Optional[str]) -> EngineConfig:
     """Read a MintPy-style config file and extract the engine section."""
     config = read_config(config_file)
+    from mintpy.stdproc.config_map import normalize_config
+    normalize_config(config)
     work_dir = get_opt(config, 'slc2ifg.work_dir', fallback='./')
     work_path = Path(work_dir)
     if not work_path.is_absolute():

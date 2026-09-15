@@ -24,7 +24,6 @@ functions) — ``mintpy/multilook.py`` and other core modules import it
 without pulling GDAL.
 """
 
-import argparse
 import logging
 import os
 import warnings
@@ -180,7 +179,7 @@ def _output_matches_looks(input_tif, output_tif, lks_y, lks_x):
 
 
 def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
-                  processor='isce3', box=None):
+                  processor='isce3', box=None, driver='GTiff'):
     """Apply multilooking (spatial averaging/resampling) to a GDAL-readable file.
 
     Parameters
@@ -249,7 +248,7 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
     # Warn if file extension does not match processor expectations
     input_ext = Path(input_tif).suffix.lower()
     if processor == 'isce2':
-        expected_exts = ['.slc', '.int', '.rdr', '.full', '.vrt']
+        expected_exts = ['.slc', '.int', '.rdr', '.full', '.vrt', '.tif', '.tiff']
         if input_ext not in expected_exts:
             logger.warning(
                 f"Processor 'isce2' expects ENVI-style files (extensions {expected_exts}), "
@@ -274,9 +273,10 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
         if band_count == 0:
             raise ValueError(f"No raster bands found in file: {input_tif}")
 
-        # Get geotransform and projection
-        geotransform = ds.GetGeoTransform()
-        projection = ds.GetProjection()
+        # Get geotransform and projection (None for radar-coordinate products)
+        from . import io as sio
+        geotransform = sio.get_geotransform(ds)
+        projection = ds.GetProjection() if geotransform is not None else ''
 
         # IO box: (x0, y0, x1, y1) in input pixels; None = whole image
         if box is not None:
@@ -323,14 +323,17 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
             data = multilook_data(data, lks_y, lks_x, method)
 
         # Update geotransform: shift origin to the box corner, then scale by looks
-        new_geotransform = (
-            geotransform[0] + x0 * geotransform[1] + y0 * geotransform[2],
-            geotransform[1] * lks_x,
-            geotransform[2],
-            geotransform[3] + x0 * geotransform[4] + y0 * geotransform[5],
-            geotransform[4],
-            geotransform[5] * lks_y,
-        )
+        # (skipped entirely for a radar-coordinate / non-georeferenced product)
+        new_geotransform = None
+        if geotransform is not None:
+            new_geotransform = (
+                geotransform[0] + x0 * geotransform[1] + y0 * geotransform[2],
+                geotransform[1] * lks_x,
+                geotransform[2],
+                geotransform[3] + x0 * geotransform[4] + y0 * geotransform[5],
+                geotransform[4],
+                geotransform[5] * lks_y,
+            )
 
         # Create output directory
         output_dir = os.path.dirname(output_tif)
@@ -358,15 +361,13 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
         else:
             height, width = data.shape[1], data.shape[2]
 
-        # Select driver based on processor
-        if processor == 'isce2':
-            driver = gdal.GetDriverByName('ENVI')
-            options = []
-        else:  # isce3
-            driver = gdal.GetDriverByName('GTiff')
-            options = ['COMPRESS=LZW', 'TILED=YES']
+        # slc2ifg products are GeoTIFF for both processors; ENVI is kept for the
+        # isce2 geometry products, which MintPy's prep_isce/load_data read as
+        # ISCE2 binary (+ .hdr / .xml)
+        drv = gdal.GetDriverByName(driver)
+        options = ['COMPRESS=LZW', 'TILED=YES'] if driver == 'GTiff' else []
 
-        out_ds = driver.Create(
+        out_ds = drv.Create(
             output_tif,
             width,
             height,
@@ -379,9 +380,13 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
             error_msg = gdal.GetLastErrorMsg()
             raise RuntimeError(f"Failed to create output file: {output_tif}. GDAL error: {error_msg}")
 
-        out_ds.SetGeoTransform(new_geotransform)
-        if projection:
-            out_ds.SetProjection(projection)
+        if new_geotransform is not None:
+            out_ds.SetGeoTransform(new_geotransform)
+            if projection:
+                out_ds.SetProjection(projection)
+        elif driver == 'GTiff':
+            out_ds.SetMetadataItem('PROCESSOR', 'gdal')
+            out_ds.SetMetadataItem('SLC2IFG_PROCESSOR', 'isce2')
 
         # Write data for each band
         for band_idx in range(band_count):
@@ -408,7 +413,9 @@ def multilook_tif(input_tif, output_tif=None, lks_y=1, lks_x=1, method='mean',
         out_ds = None
         logger.debug(f"Successfully created: {output_tif}")
 
-        if processor == 'isce2':
+        if driver == 'ENVI':
+            # ISCE2 geometry: keep the ISCE2 xml companion so that
+            # extract_multilook_number()/read_isce_xml() keep working
             ext = Path(output_tif).suffix.lower()
             family = 'intimage' if ext == '.int' else 'image'
             from .utils.slc2ifg_utils import create_xml_for_binary
@@ -565,7 +572,8 @@ def process_geometry_files(geom_dir, input_file, lks_y, lks_x, output_geom_dir=N
                 lks_y=lks_y,
                 lks_x=lks_x,
                 method='nearest',
-                processor=processor
+                processor=processor,
+                driver='ENVI' if processor == 'isce2' else 'GTiff',
             )
             processed_files += 1
         except Exception as e:
@@ -573,56 +581,6 @@ def process_geometry_files(geom_dir, input_file, lks_y, lks_x, output_geom_dir=N
 
     logger.info(f"Processed {processed_files} geometry files")
     return output_geom_dir
-
-
-def parse_arguments(args_list=None):
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description='Multilook files using multilook_tif function.',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # ISCE3 (GeoTIFF) single file
-  multilook.py --processor isce3 --input data.tif --lks-y 4 --lks-x 4
-
-  # ISCE2 (ENVI) batch processing
-  multilook.py --processor isce2 --input-dir ./interferograms --pattern *.int --lks-y 4 --lks-x 4 --output-dir ./multilooked
-
-  # Process geometry files along with input files
-  multilook.py --processor isce2 --input-dir ./interferograms --pattern *.int --lks-y 4 --lks-x 4 --geom-dir ./geom
-        """
-    )
-
-    parser.add_argument(
-        '--processor',
-        type=str,
-        choices=['isce2', 'isce3'],
-        required=True,
-        help="Processor type: 'isce2' (radar coordinates, ENVI format) or 'isce3' (geocoded, GeoTIFF)"
-    )
-
-    input_group = parser.add_mutually_exclusive_group(required=False)
-    input_group.add_argument('--input', '-i', help='Path to single input file to be multilooked')
-    input_group.add_argument('--input-dir', help='Directory containing files to be multilooked')
-
-    parser.add_argument('--ref-file', help='Reference IFG file for geometry dimension matching (requires --geom-dir)')
-    parser.add_argument('--geom-only', action='store_true', help='Only process geometry files, skip IFG multilooking')
-
-    parser.add_argument('--pattern', default="*.tif", help='File pattern for batch processing (default: *.tif)')
-    parser.add_argument('--lks-y', type=int, required=True, help='Number of looks in y / row direction')
-    parser.add_argument('--lks-x', type=int, required=True, help='Number of looks in x / column direction')
-    parser.add_argument('--output', '-o', default=None, help='Path to output multilooked file (for single file processing)')
-    parser.add_argument('--output-dir', default=None, help='Output directory for batch processing')
-    parser.add_argument('--method', choices=['mean', 'median', 'nearest'], default='mean', help='Multilook method')
-    parser.add_argument('--max-workers', type=int, default=4, help='Number of parallel workers (default: 4)')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output for debugging')
-    parser.add_argument('--geom-dir', help='Directory containing geometry files (.full) to be multilooked')
-    parser.add_argument('--output-geom-dir', help='Output directory for multilooked geometry files')
-
-    if args_list is None:
-        return parser.parse_args()
-    else:
-        return parser.parse_args(args_list)
 
 
 def process_single_file_wrapper(task):
@@ -716,55 +674,3 @@ def process_batch_files(args):
     logger.info(f"  Output directory: {output_dir}")
 
 
-def main(args=None):
-    """Main function to handle command line arguments and execute the script."""
-    if args is None:
-        args = parse_arguments()
-
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Verbose debugging enabled")
-
-    if args.lks_y <= 0 or args.lks_x <= 0:
-        raise ValueError("Look numbers (--lks-y and --lks-x) must be positive integers")
-
-    # Process geometry files if specified
-    if args.geom_dir:
-        if not os.path.isdir(args.geom_dir):
-            raise FileNotFoundError(f"Geometry directory not found: {args.geom_dir}")
-
-        if args.ref_file:
-            reference_file = args.ref_file
-        elif args.input:
-            reference_file = args.input
-        elif args.input_dir:
-            input_files = sorted(Path(args.input_dir).glob(args.pattern))
-            if not input_files:
-                raise FileNotFoundError(f"No files found in {args.input_dir} matching pattern {args.pattern}")
-            reference_file = str(input_files[0])
-        else:
-            raise ValueError("--ref-file, --input, or --input-dir is required with --geom-dir")
-
-        logger.info(f"Processing geometry files with reference to: {reference_file}")
-        geom_output_dir = process_geometry_files(
-            geom_dir=args.geom_dir,
-            input_file=reference_file,
-            lks_y=args.lks_y,
-            lks_x=args.lks_x,
-            output_geom_dir=args.output_geom_dir,
-            processor=args.processor
-        )
-        if geom_output_dir:
-            logger.info(f"Geometry files processed and saved to: {geom_output_dir}")
-
-    # Process input files (skip if --geom-only)
-    if args.geom_only:
-        pass
-    elif args.input:
-        process_single_file(args)
-    elif args.input_dir:
-        process_batch_files(args)
-
-
-if __name__ == '__main__':
-    main()

@@ -27,8 +27,8 @@ from mintpy.stdproc.engine.tool import (
 #: complex_coh / phsig_coh share the slc2ifg.generate_coh.* config section
 _GENERATE_COH_PARAMS = [
     ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.generate_coh.slc_pattern'),
-    ParamSpec('subdataset', cfg='slc2ifg.generate_coh.subdataset',
+                  legacy_cfg='slc2ifg.slc_pattern'),
+    ParamSpec('subdataset', cfg='slc2ifg.subdataset',
               default='/data/VV'),
     ParamSpec('window_size', cfg='slc2ifg.generate_coh.cc_window_size',
               kind='int', default=5),
@@ -50,9 +50,9 @@ _GENERATE_COH_PARAMS = [
 #: coherence-shape check passes) without materialising cropped SLCs.
 _COMPLEX_COH_AOI_PARAMS = [
     ParamSpec('bbox', cfg='slc2ifg.bbox',
-              legacy_cfg='slc2ifg.crop_slc.wsen'),
+              legacy_cfg='slc2ifg.bbox'),
     ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer', kind='float',
-              legacy_cfg='slc2ifg.crop_slc.buffer'),
+              legacy_cfg='slc2ifg.bbox_buffer'),
 ]
 
 
@@ -77,7 +77,7 @@ class ComplexCohTool(Tool):
             return skipped
 
         from mintpy.stdproc.engine.gpu_kernels import cupy_available
-        from mintpy.stdproc.generate_coh_complex import (
+        from mintpy.stdproc.generate_coh import (
             find_slc_file_by_date,
         )
         from mintpy.stdproc.utils import naming
@@ -108,10 +108,10 @@ class ComplexCohTool(Tool):
         crop_window = None
         bbox = ctx.param('bbox')
         if bbox:
-            from mintpy.stdproc.crop_slc_geo import bbox_to_window, parse_wsen
+            from mintpy.stdproc import io as sio
             bbox_buffer = float(ctx.param('bbox_buffer', 0.0) or 0.0)
-            crop_window = bbox_to_window(
-                str(slc1), parse_wsen(str(bbox)), sub, bbox_buffer)
+            crop_window = sio.bbox_to_window(
+                str(slc1), sio.parse_wsen(str(bbox)), sub, bbox_buffer)
             if crop_window is None:
                 raise ValueError(
                     f"bbox {bbox} does not intersect SLC {slc1} "
@@ -134,11 +134,10 @@ class ComplexCohTool(Tool):
                             ctx.elapsed_str())
         else:
             from mintpy.stdproc.engine.gpu_kernels import complex_coh_block
-            from mintpy.stdproc.generate_coh_complex import (
+            from mintpy.stdproc.generate_coh import (
                 read_complex_image,
                 write_coherence_image,
             )
-            from mintpy.stdproc.utils.slc2ifg_utils import create_xml_for_binary
 
             s1, meta = read_complex_image(str(slc1), processor, subdataset=sub,
                                           window=crop_window)
@@ -157,9 +156,7 @@ class ComplexCohTool(Tool):
                 coh[-half:, :] = 0
                 coh[:, :half] = 0
                 coh[:, -half:] = 0
-            write_coherence_image(str(out), coh, meta, processor)
-            if processor == 'isce2':
-                create_xml_for_binary(out, family='image',
-                                      description='Complex correlation magnitude')
+            write_coherence_image(str(out), coh, meta, processor,
+                                  'complex correlation magnitude')
 
         return {'coh': out}

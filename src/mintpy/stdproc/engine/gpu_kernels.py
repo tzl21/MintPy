@@ -16,7 +16,7 @@ file I/O stays on the CPU.
 Kernels:
 - ``complex_coh_block`` — boxcar complex coherence (windowed sums)
 - ``estimate_phsig_block`` — phase-sigma correlation (gradients + windowed
-  deramping), mirroring ``generate_coh_phsig.estimate_phsig_correlation``
+  deramping), mirroring ``generate_coh.estimate_phsig_correlation``
 - ``goldstein_block`` — Goldstein filter on one padded block with a patch
   grid anchored to the *full-image* coordinate system (bit-identical to
   ``filter_utils.goldstein``), with batched GPU FFTs.
@@ -121,7 +121,7 @@ def _note_fallback(name: str, exc: Exception) -> None:
 
 
 def _gaussian_kernel_cp(size: int):
-    """Gaussian kernel matching ``generate_coh_phsig._gaussian_kernel``."""
+    """Gaussian kernel matching ``generate_coh._gaussian_kernel``."""
     half = size // 2
     idx = cp.arange(size, dtype=cp.float64)
     w1 = (idx[:, None] - half) ** 2 + (idx[None, :] - half) ** 2
@@ -154,7 +154,7 @@ def _complex_coh_cpu(slc1: np.ndarray, slc2: np.ndarray, window: int,
                      window_type: str = 'triangular'):
     from scipy.ndimage import correlate
 
-    from mintpy.stdproc.generate_coh_complex import coherence_kernel
+    from mintpy.stdproc.generate_coh import coherence_kernel
 
     win = window if window % 2 else window + 1
     kernel = coherence_kernel(win, window_type)
@@ -172,7 +172,7 @@ def _complex_coh_cpu(slc1: np.ndarray, slc2: np.ndarray, window: int,
 
 def _complex_coh_gpu(slc1: np.ndarray, slc2: np.ndarray, window: int,
                      window_type: str = 'triangular'):
-    from mintpy.stdproc.generate_coh_complex import coherence_kernel
+    from mintpy.stdproc.generate_coh import coherence_kernel
 
     win = window if window % 2 else window + 1
     kernel = cp.asarray(coherence_kernel(win, window_type))
@@ -199,7 +199,7 @@ def estimate_phsig_block(ifg_arr: np.ndarray, ps_win: int = 5,
                          gpu: bool = False) -> np.ndarray:
     """Phase-sigma correlation of a complex block -> float32.
 
-    Mirrors ``generate_coh_phsig.estimate_phsig_correlation``.  Border
+    Mirrors ``generate_coh.estimate_phsig_correlation``.  Border
     zeroing matches the full-image run via the caller's ``zero_margin``.
     """
     if gpu and cupy_available():
@@ -207,7 +207,7 @@ def estimate_phsig_block(ifg_arr: np.ndarray, ps_win: int = 5,
             return _phsig_gpu(ifg_arr, ps_win, grad_win, nlks)
         except Exception as e:
             _note_fallback('phsig', e)
-    from mintpy.stdproc.generate_coh_phsig import estimate_phsig_correlation
+    from mintpy.stdproc.generate_coh import estimate_phsig_correlation
     return estimate_phsig_correlation(ifg_arr, ps_win, grad_win, nlks)
 
 

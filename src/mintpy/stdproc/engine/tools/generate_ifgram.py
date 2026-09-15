@@ -37,8 +37,8 @@ class GenerateIfgramTool(Tool):
     params_spec = [
         # unified SLC pattern; legacy generate_ifgram.slc_pattern as fallback
         ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.generate_ifgram.slc_pattern'),
-        ParamSpec('subdataset', cfg='slc2ifg.generate_ifgram.subdataset',
+                  legacy_cfg='slc2ifg.slc_pattern'),
+        ParamSpec('subdataset', cfg='slc2ifg.subdataset',
                   default='/data/VV'),
         ParamSpec('no_verify', cfg='slc2ifg.generate_ifgram.no_verify',
                   kind='bool', default=False),
@@ -49,9 +49,9 @@ class GenerateIfgramTool(Tool):
         # stored.  The engine pops these params when crop_slc is enabled
         # (the SLCs are then already cropped).
         ParamSpec('bbox', cfg='slc2ifg.bbox',
-                  legacy_cfg='slc2ifg.crop_slc.wsen'),
+                  legacy_cfg='slc2ifg.bbox'),
         ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer',
-                  legacy_cfg='slc2ifg.crop_slc.buffer',
+                  legacy_cfg='slc2ifg.bbox_buffer',
                   kind='float', default=0.0),
     ]
 
@@ -87,9 +87,9 @@ class GenerateIfgramTool(Tool):
         window = None
         bbox = ctx.param('bbox')
         if bbox:
-            from mintpy.stdproc.crop_slc_geo import bbox_to_window, parse_wsen
-            window = bbox_to_window(
-                slc1, parse_wsen(str(bbox)),
+            from mintpy.stdproc import io as sio
+            window = sio.bbox_to_window(
+                slc1, sio.parse_wsen(str(bbox)),
                 ctx.param('subdataset', '/data/VV'),
                 float(ctx.param('bbox_buffer', 0.0) or 0.0))
             if window is None:

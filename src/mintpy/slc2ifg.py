@@ -17,7 +17,7 @@ a directory of SLC images, as a pre-processing step before MintPy's
 - **insarflow engine** (``pip install mintpy[engine]``): Dask-scheduled
   CPU/GPU execution with tiling and artifact management.
 
-The backend is selected by ``mintpy.slc2ifg.engine = none | insarflow |
+The backend is selected by ``slc2ifg.engine = none | insarflow |
 auto`` in the config.  With ``auto`` (default) the engine is used when the
 ``insarflow`` package is importable, otherwise the basic executor runs the
 full pipeline — MintPy can always complete the slc2ifg workflow.
@@ -45,11 +45,14 @@ def read_slc2ifg_template(cfg_file):
     return tdict
 
 
-def run_slc2ifg(cfg_file=None, template=None):
+def run_slc2ifg(cfg_file=None, template=None, overrides=None):
     """Run the slc2ifg pipeline from a config file or a template dict.
 
     Parameters: cfg_file  - str, path to the MintPy-style config file
                 template  - dict, pre-parsed config (takes precedence)
+                overrides - dict, command line overrides forwarded to the
+                            engine backend (scheduler/max_workers/gpu/
+                            keep_intermediates/dry_run/tool/restore)
     Returns:    None
     """
     from mintpy.stdproc.executor import get_executor
@@ -59,8 +62,12 @@ def run_slc2ifg(cfg_file=None, template=None):
         # (read_template accepts a raw string directly)
         template = readfile.read_template(template)
     cfg = template if template else read_slc2ifg_template(cfg_file)
+    from mintpy.stdproc.config_map import normalize_config
+    cfg = normalize_config(cfg)
     if cfg_file:
         cfg['_cfg_file'] = os.path.abspath(cfg_file)
+    if overrides:
+        cfg['_overrides'] = dict(overrides)
 
     # validate the mandatory input
     slc_input = cfg.get('slc2ifg.slc_input')
@@ -84,9 +91,10 @@ def main(iargs=None):
     """Command line entry (mintpy slc2ifg <cfg>)."""
     from mintpy.cli import slc2ifg as cli
 
-    inps = cli.parse_arguments(iargs)
+    inps = cli.cmd_line_parse(iargs)
     run_slc2ifg(cfg_file=inps.cfg_file,
-                template=None if inps.cfg_file else inps.template)
+                template=None if inps.cfg_file else inps.template,
+                overrides=vars(inps))
     return 0
 
 

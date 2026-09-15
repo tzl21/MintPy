@@ -434,6 +434,63 @@ def get_slc2ifg_parser(subparsers=None):
     return parser
 
 
+# slc2ifg pre-processing steps (mintpy.stdproc), also usable standalone
+def get_crop_slc_parser(subparsers=None):
+    from mintpy.cli import crop_slc
+    parser = crop_slc.create_parser(subparsers)
+    parser.set_defaults(func=crop_slc.main)
+    return parser
+
+
+def get_generate_coh_parser(subparsers=None):
+    from mintpy.cli import generate_coh
+    parser = generate_coh.create_parser(subparsers)
+    parser.set_defaults(func=generate_coh.main)
+    return parser
+
+
+def get_generate_ifgram_parser(subparsers=None):
+    from mintpy.cli import generate_ifgram
+    parser = generate_ifgram.create_parser(subparsers)
+    parser.set_defaults(func=generate_ifgram.main)
+    return parser
+
+
+def get_ifgram_list_parser(subparsers=None):
+    from mintpy.cli import ifgram_list
+    parser = ifgram_list.create_parser(subparsers)
+    parser.set_defaults(func=ifgram_list.main)
+    return parser
+
+
+def get_filter_parser(subparsers=None):
+    from mintpy.cli import filter as filter_cli
+    parser = filter_cli.create_parser(subparsers)
+    parser.set_defaults(func=filter_cli.main)
+    return parser
+
+
+def get_stitch_parser(subparsers=None):
+    from mintpy.cli import stitch
+    parser = stitch.create_parser(subparsers)
+    parser.set_defaults(func=stitch.main)
+    return parser
+
+
+def get_unwrap_ifgram_parser(subparsers=None):
+    from mintpy.cli import unwrap_ifgram
+    parser = unwrap_ifgram.create_parser(subparsers)
+    parser.set_defaults(func=unwrap_ifgram.main)
+    return parser
+
+
+def get_merge_parser(subparsers=None):
+    from mintpy.cli import merge
+    parser = merge.create_parser(subparsers)
+    parser.set_defaults(func=merge.main)
+    return parser
+
+
 def get_solid_earth_tides_parser(subparsers=None):
     from mintpy.cli import solid_earth_tides
     parser = solid_earth_tides.create_parser(subparsers)
@@ -608,6 +665,16 @@ def get_parser():
     # workflow
     get_smallbaselineApp_parser(sp)
     get_slc2ifg_parser(sp)
+
+    # slc2ifg pre-processing steps (standalone tools)
+    get_crop_slc_parser(sp)
+    get_ifgram_list_parser(sp)
+    get_generate_ifgram_parser(sp)
+    get_stitch_parser(sp)
+    get_generate_coh_parser(sp)
+    get_filter_parser(sp)
+    get_unwrap_ifgram_parser(sp)
+    get_merge_parser(sp)
 
     # standard processing
     get_asc_desc2horz_vert_parser(sp)

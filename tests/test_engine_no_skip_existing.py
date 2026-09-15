@@ -96,8 +96,6 @@ def test_engine_injects_the_param_into_every_tool(tmp_path):
     for tool in ('generate_ifgram', 'complex_coh', 'multilook', 'filter',
                  'phsig_coh', 'unwrap', 'crop_slc'):
         assert eng._tool_params(tool)['no_skip_existing'] is True, tool
-    # the crop stage also reads its stage-specific alias
-    assert eng._tool_params('crop_slc')['crop_no_skip_existing'] is False
 
 
 def test_engine_default_is_false(tmp_path):
@@ -107,15 +105,15 @@ def test_engine_default_is_false(tmp_path):
 
 
 def test_crop_alias_alone_also_works(tmp_path):
+    """The legacy crop_slc.no_skip_existing is mapped to the engine-wide knob."""
     eng = _engine(tmp_path, 'slc2ifg.crop_slc.no_skip_existing = true\n')
-    assert eng._tool_params('crop_slc')['crop_no_skip_existing'] is True
-    # ... while the global flag stays off for the other stages
-    assert eng._tool_params('generate_ifgram')['no_skip_existing'] is False
+    assert eng._tool_params('crop_slc')['no_skip_existing'] is True
+    assert eng._tool_params('generate_ifgram')['no_skip_existing'] is True
 
 
 def test_template_declares_the_key_as_auto():
     """The key ships in the template and 'auto' resolves to False."""
     cfg = read_config(None)
-    for key in ('engine.no_skip_existing', 'slc2ifg.crop_slc.no_skip_existing'):
+    for key in ('engine.no_skip_existing',):
         assert cfg.has_option('slc2ifg', key), key
         assert get_bool_opt(cfg, key, fallback=False) is False, key

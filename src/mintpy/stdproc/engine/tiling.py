@@ -147,26 +147,31 @@ def _open_like(input_file, output_file, rows: int, cols: int, gdt: int,
     ``origin`` ``(x0, y0)`` shifts the input geotransform to that pixel, so a
     windowed (read-time-cropped) product keeps the correct georeferencing.
     """
+    from mintpy.stdproc import io as sio
     from mintpy.stdproc.utils.slc2ifg_utils import open_gdal
     src = open_gdal(input_file, subdataset)
-    gt = src.GetGeoTransform()
-    proj = src.GetProjection()
+    # None for a radar-coordinate product (isce2): no georeferencing to inherit
+    gt = sio.get_geotransform(src)
+    proj = src.GetProjection() if gt is not None else ''
     src = None
     if gt is not None and origin is not None:
         x0, y0 = int(origin[0]), int(origin[1])
         gt = (gt[0] + x0 * gt[1] + y0 * gt[2], gt[1], gt[2],
               gt[3] + x0 * gt[4] + y0 * gt[5], gt[4], gt[5])
-    driver_name = 'GTiff' if processor == 'isce3' else 'ENVI'
-    options = (['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER']
-               if processor == 'isce3' else [])
+    # both processors write GeoTIFF; isce2 products stay geo-less
+    driver_name = 'GTiff'
+    options = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER']
     out_path = Path(output_file)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     drv = gdal.GetDriverByName(driver_name)
     ds = drv.Create(str(out_path), cols, rows, 1, gdt, options)
-    if gt is not None:
+    if gt is not None and processor != 'isce2':
         ds.SetGeoTransform(gt)
-    if proj:
-        ds.SetProjection(proj)
+        if proj:
+            ds.SetProjection(proj)
+    else:
+        ds.SetMetadataItem('PROCESSOR', 'gdal')
+        ds.SetMetadataItem('SLC2IFG_PROCESSOR', 'isce2')
     return ds
 
 

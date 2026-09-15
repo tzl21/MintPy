@@ -61,8 +61,13 @@ def write_arr(
     if ref_ds is None:
         raise RuntimeError(f"Cannot open reference {like_filename}")
     rows, cols = ref_ds.RasterYSize, ref_ds.RasterXSize
-    gt = ref_ds.GetGeoTransform()
-    proj = ref_ds.GetProjection()
+    # None for a radar-coordinate / non-georeferenced reference, so the output
+    # stays geo-less instead of inheriting GDAL's default identity transform
+    try:
+        gt = ref_ds.GetGeoTransform(can_return_null=True)
+    except TypeError:
+        gt = ref_ds.GetGeoTransform()
+    proj = ref_ds.GetProjection() if gt is not None else ''
     ref_ds = None
 
     if arr.shape != (rows, cols):

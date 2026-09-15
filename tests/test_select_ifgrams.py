@@ -729,17 +729,16 @@ def test_generate_pairs_select_uses_num_connections():
 # CLI integration
 # ------------------------------------------------------------------------
 def test_ifgram_list_cli_select_mode(tmp_path, capsys):
-    from mintpy.stdproc import ifgram_list
+    from mintpy.cli import ifgram_list
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
     for d in DATES:
         (slc_dir / d).mkdir()
     out = tmp_path / 'ifg'
-    args = ifgram_list.parse_arguments([
+    rc = ifgram_list.main([
         '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'select',
         '--select-weight-source', 'model', '--select-min-degree', '2',
     ])
-    rc = ifgram_list.main(args)
     assert rc == 0
     pair_file = out / 'ifgram_list.txt'
     assert pair_file.exists()
@@ -750,19 +749,18 @@ def test_ifgram_list_cli_select_mode(tmp_path, capsys):
 
 
 def test_ifgram_list_cli_select_report(tmp_path):
-    from mintpy.stdproc import ifgram_list
+    from mintpy.cli import ifgram_list
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
     for d in DATES:
         (slc_dir / d).mkdir()
     out = tmp_path / 'ifg'
     report = tmp_path / 'report.json'
-    args = ifgram_list.parse_arguments([
+    rc = ifgram_list.main([
         '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'select',
         '--select-weight-source', 'model',
         '--select-report', str(report),
     ])
-    rc = ifgram_list.main(args)
     assert rc == 0
     data = json.loads(report.read_text())
     assert data['connected'] is True
@@ -909,7 +907,8 @@ def _uninstall_fake_osgeo():
     for key in ('osgeo', 'osgeo.gdal', 'osgeo.osr'):
         sys.modules.pop(key, None)
     # drop cached modules that imported the fake (re-imported on next use)
-    for key in ('mintpy.stdproc.generate_coh_complex',
+    for key in ('mintpy.stdproc.generate_coh',
+                'mintpy.stdproc.io',
                 'mintpy.stdproc.utils.slc2ifg_utils'):
         sys.modules.pop(key, None)
 
@@ -952,7 +951,7 @@ def test_quick_coherence_weights(tmp_path):
 def test_quick_coherence_bbox_window(tmp_path, monkeypatch):
     """With a bbox, quick coherence reads ONLY the AOI window of each SLC
     (no whole-scene read) and block-averages it by nlks."""
-    import mintpy.stdproc.crop_slc_geo as csg
+    import mintpy.stdproc.io as sio
 
     from mintpy.stdproc.select_ifgrams import (
         _read_windowed_slc,
@@ -977,7 +976,7 @@ def test_quick_coherence_bbox_window(tmp_path, monkeypatch):
         seen.append((tuple(wsen), float(buffer)))
         return (8, 8, 32, 32)
 
-    monkeypatch.setattr(csg, 'bbox_to_window', fake_bbox_to_window)
+    monkeypatch.setattr(sio, 'bbox_to_window', fake_bbox_to_window)
 
     _install_fake_osgeo(sources)
     try:
@@ -1002,7 +1001,7 @@ def test_quick_coherence_bbox_window(tmp_path, monkeypatch):
             str(slc_dir / '20230105.slc.tif'), (8, 8, 32, 32), 1).shape == (32, 32)
 
         # a bbox with no overlap -> every pair is unweighted (None)
-        monkeypatch.setattr(csg, 'bbox_to_window', lambda *a, **k: None)
+        monkeypatch.setattr(sio, 'bbox_to_window', lambda *a, **k: None)
         w2 = quick_coherence_weights(
             dates, pairs, str(slc_dir), processor='isce3',
             bbox=(1.0, 2.0, 3.0, 4.0))

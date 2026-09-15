@@ -84,33 +84,36 @@ class AtmosphereTool(Tool):
                 f"into AtmosphereTool.run")
 
         processor = ctx.param('processor', 'isce3')
-        driver_name = 'GTiff' if processor == 'isce3' else 'ENVI'
-        drv = gdal.GetDriverByName(driver_name)
+        # both processors write GeoTIFF; isce2 radar products stay geo-less
+        drv = gdal.GetDriverByName('GTiff')
         # atomic write: create at '<out>.tmp' and rename on success
         tmp = f"{out}.{os.getpid()}.tmp"
         try:
             out_ds = drv.Create(tmp, ds.RasterXSize, ds.RasterYSize, 1,
                                 band.DataType,
-                                options=([] if processor == 'isce2'
-                                         else ['COMPRESS=LZW', 'TILED=YES']))
+                                options=['COMPRESS=LZW', 'TILED=YES'])
             if out_ds is None:
                 raise RuntimeError(
                     f"atmosphere: failed to create {out}: "
                     f"{gdal.GetLastErrorMsg()}")
-            out_ds.SetGeoTransform(ds.GetGeoTransform())
-            out_ds.SetProjection(ds.GetProjection())
+            if processor != 'isce2':
+                from mintpy.stdproc import io as sio
+                gt = sio.get_geotransform(ds)
+                if gt is not None:
+                    out_ds.SetGeoTransform(gt)
+                    proj = ds.GetProjection()
+                    if proj:
+                        out_ds.SetProjection(proj)
+            else:
+                out_ds.SetMetadataItem('PROCESSOR', 'gdal')
+                out_ds.SetMetadataItem('SLC2IFG_PROCESSOR', 'isce2')
             out_ds.GetRasterBand(1).WriteArray(corrected)
             out_ds.FlushCache()
             out_ds = None
             os.replace(tmp, str(out))
             tmp_hdr = f"{tmp}.hdr"
             if os.path.exists(tmp_hdr):
-                os.replace(tmp_hdr, f"{out}.hdr")
-            if processor == 'isce2':
-                from mintpy.stdproc.utils.slc2ifg_utils import (
-                    create_xml_for_binary)
-                create_xml_for_binary(out, family='image',
-                                      description='Atmosphere-corrected phase')
+                os.unlink(tmp_hdr)
         except BaseException:
             for stray in (tmp, f"{tmp}.hdr"):
                 try:

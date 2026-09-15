@@ -77,25 +77,39 @@ def extract_date_pair(name: str) -> Optional[str]:
 # SLC naming
 # ------------------------------------------------------------------------
 def slc_pattern(processor: str) -> str:
-    """Default SLC glob pattern for a processor.
+    """Glob pattern of the RAW input SLCs of a processor.
 
-    isce2 -> ``*.slc``; isce3 -> ``*.slc.*`` (matches both ``.slc.tif`` and
-    ``.slc.h5``).
+    isce2 -> ``*.slc`` (ISCE2 topsApp ENVI); isce3 -> ``*.slc.*`` (matches both
+    ``.slc.tif`` and ``.slc.h5``).
+
+    NOTE: this is the *input* pattern.  The pipeline's own SLC products (e.g.
+    the output of the ``crop_slc`` stage) are always GeoTIFF for both
+    processors - use :func:`slc_product_pattern` for those.
     """
     if processor == "isce2":
         return "*.slc"
     return "*.slc.*"
 
 
-def slc_file(date: str, processor: str) -> str:
-    """Canonical SLC filename for a date.
+def slc_product_pattern() -> str:
+    """Glob pattern of the pipeline's own SLC products (always GeoTIFF)."""
+    return "*.slc.tif"
 
-    isce2 -> ``yyyymmdd.slc``; isce3 -> ``yyyymmdd.slc.tif``
-    (the ``.h5`` form is treated as an *input* variant only; the pipeline's
-    own SLC outputs use GeoTIFF).
+
+def slc_patterns(processor: str) -> Tuple[str, ...]:
+    """Candidate SLC patterns for a directory that may hold raw inputs or the
+    pipeline's own products: the product pattern first, then the raw one."""
+    return (slc_product_pattern(), slc_pattern(processor))
+
+
+def slc_file(date: str, processor: str = "isce3") -> str:
+    """Canonical pipeline SLC filename for a date: ``yyyymmdd.slc.tif``.
+
+    Both processors write GeoTIFF: isce2 radar products simply carry no
+    georeferencing.  ``processor`` is kept in the signature (and ignored) so
+    existing call sites keep working; the ``.h5`` form is an INPUT variant of
+    OPERA CSLC only.
     """
-    if processor == "isce2":
-        return f"{date}.slc"
     return f"{date}.slc.tif"
 
 
@@ -103,8 +117,12 @@ def slc_file(date: str, processor: str) -> str:
 # Product extension helpers
 # ------------------------------------------------------------------------
 def _ext(processor: str, suffix: str) -> str:
-    """Append ``.tif`` for isce3 (``suffix`` already includes the leading dot)."""
-    return f"{suffix}.tif" if processor == "isce3" else suffix
+    """Append ``.tif`` (``suffix`` already includes the leading dot).
+
+    All slc2ifg products are GeoTIFF for both processors; ``processor`` is kept
+    in the signature (and ignored) for backward-compatible call sites.
+    """
+    return f"{suffix}.tif"
 
 
 def int_ext(processor: str) -> str:
@@ -131,6 +149,13 @@ def coh_ext(processor: str, kind: str = COH_KIND_PHSIG) -> str:
     if kind not in COH_KINDS:
         raise ValueError(f"Unknown coherence kind '{kind}', expected {COH_KINDS}")
     return _ext(processor, f".{kind}.coh")
+
+
+def sig_ext(processor: str = "isce3") -> str:
+    """Extension of the phase-sigma (phase standard deviation) raster written
+    next to the phase-sigma coherence when ``keep_sigma`` is on:
+    ``xxx.phsig.sigma[.tif]``."""
+    return _ext(processor, ".phsig.sigma")
 
 
 # ------------------------------------------------------------------------
@@ -210,6 +235,20 @@ def coh_path(
     return date_pair_dir(output_dir, date1, date2) / f"{variant}{coh_ext(processor, kind)}"
 
 
+def sigma_path(
+    output_dir: Union[str, Path],
+    date1: str,
+    date2: str,
+    variant: str = "fullres",
+    processor: str = "isce3",
+) -> Path:
+    """Path of the phase-sigma (phase std-dev) raster
+    ``{date_pair}/{variant}.phsig.sigma[.tif]``."""
+    if not is_valid_variant(variant):
+        raise ValueError(f"Invalid variant '{variant}', expected one of {IFG_VARIANTS}")
+    return date_pair_dir(output_dir, date1, date2) / f"{variant}{sig_ext(processor)}"
+
+
 #: Infixes of atmosphere-corrected products (appended to the base product name)
 ATM_INFIX = ".atm"
 
@@ -242,11 +281,11 @@ def strip_product_extensions(name: str, processor: str) -> str:
     (the ``.cpx``/``.phsig`` coherence infix is also removed).
     """
     stem = name
-    # Remove trailing processor extension (.tif for isce3)
-    if processor == "isce3" and stem.endswith(".tif"):
+    # Remove the trailing GeoTIFF extension (all processors write .tif)
+    if stem.endswith(".tif"):
         stem = stem[:-4]
     # Remove product extension (check .unw.conncomp before .unw/.conncomp)
-    for prod_ext in (".unw.conncomp", ".conncomp", ".int", ".unw", ".coh"):
+    for prod_ext in (".unw.conncomp", ".conncomp", ".int", ".unw", ".coh", ".sigma"):
         if stem.endswith(prod_ext):
             stem = stem[: -len(prod_ext)]
             break

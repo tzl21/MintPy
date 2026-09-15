@@ -23,9 +23,7 @@ DEFAULT_DATETIME_FORMAT = "%Y%m%d"
 # VRT template matching dolphin's VRTDerivedRasterBand format
 _VRT_TEMPLATE = """\
 <VRTDataset rasterXSize="{xsize}" rasterYSize="{ysize}">
-    <SRS>{srs}</SRS>
-    <GeoTransform>{geotransform}</GeoTransform>
-    <VRTRasterBand dataType="CFloat32" band="1" subClass="VRTDerivedRasterBand">
+{geo_block}    <VRTRasterBand dataType="CFloat32" band="1" subClass="VRTDerivedRasterBand">
         <PixelFunctionType>cmul</PixelFunctionType>
         <SimpleSource>
             <SourceFilename relativeToVRT="{rel}">{ref_slc}</SourceFilename>
@@ -61,12 +59,20 @@ def _get_raster_xysize(path: str) -> tuple:
     return xsize, ysize
 
 
-def _get_geotransform(path: str) -> str:
-    """Get geotransform as a comma-separated string."""
+def _get_geotransform(path: str):
+    """Return ``(geotransform_str, projection)``; geotransform is None when the
+    raster carries no georeferencing (radar-coordinate isce2 product)."""
     ds = gdal.Open(path, gdal.GA_ReadOnly)
-    gt = ds.GetGeoTransform()
-    proj = ds.GetProjection()
+    if ds is None:
+        raise RuntimeError(f"Cannot open: {path}")
+    try:
+        gt = ds.GetGeoTransform(can_return_null=True)
+    except TypeError:
+        gt = ds.GetGeoTransform()
+    proj = ds.GetProjection() if gt is not None else ''
     ds = None
+    if gt is None:
+        return None, ''
     return ', '.join(str(x) for x in gt), proj
 
 
@@ -128,11 +134,17 @@ class VRTInterferogram:
 
         rel = "1" if self.use_relative else "0"
 
+        # a radar-coordinate SLC has no georeferencing: emit no SRS/GeoTransform
+        # rather than GDAL's default identity transform
+        geo_block = ''
+        if gt is not None:
+            geo_block = (f'    <SRS>{srs}</SRS>\n'
+                         f'    <GeoTransform>{gt}</GeoTransform>\n')
+
         content = _VRT_TEMPLATE.format(
             xsize=xsize,
             ysize=ysize,
-            srs=srs,
-            geotransform=gt,
+            geo_block=geo_block,
             rel=rel,
             ref_slc=self._ref_gdal_str,
             sec_slc=self._sec_gdal_str,
