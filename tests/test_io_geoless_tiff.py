@@ -168,7 +168,8 @@ def test_write_gdal_geo_true_requires_georeferencing(tmp_path):
         write_gdal(np.zeros((2, 2), dtype=np.float32), {}, out_file=str(out), geo=True)
 
 
-def test_bbox_to_window_geoless_raises(tmp_path):
+def test_bbox_to_window_geoless_no_geometry_raises(tmp_path):
+    """A geoless raster with no standard ISCE2 geom_reference cannot be mapped."""
     out = tmp_path / '20200101.slc.tif'
     sio.write_raster(np.ones((8, 8), dtype=np.complex64), out,
                      meta={'FILE_TYPE': '.slc'}, geo=False, processor='isce2')

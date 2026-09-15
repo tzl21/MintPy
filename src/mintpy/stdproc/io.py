@@ -604,14 +604,19 @@ def bbox_to_window(slc_path: Union[str, Path], wsen,
                    ) -> Optional[Tuple[int, int, int, int]]:
     """Map a WSEN bbox (EPSG:4326, degrees) to a pixel window in an SLC file.
 
-    Mirrors the write-to-disk crop: ``wsen`` is expanded by ``buffer`` (degrees),
-    intersected with the SLC extent, transformed to the SLC CRS and snapped to
-    its pixel grid with a 1-px margin, then clamped to the image.
+    Three cases, all mapping the AOI to the SLC's own pixel grid with a 1-px
+    margin and clamping to the image:
+
+    * **HDF5** (OPERA-style): via the file's ``x/y_coordinates``;
+    * **geocoded raster**: via its geotransform/projection;
+    * **isce2 radar coordinates** (no georeferencing): via the standard ISCE2
+      ``<merged>/geom_reference`` lookup tables (``lat.rdr.full`` /
+      ``lon.rdr.full``), so read-time cropping works for isce2 too.
 
     Parameters
     ----------
     slc_path : str or Path
-        Geocoded SLC (GeoTIFF, or HDF5 with x/y_coordinates).
+        SLC file (GeoTIFF, HDF5, or the radar-coordinate ISCE2 SLC).
     wsen : tuple of 4 floats
         (west, south, east, north) in EPSG:4326.
     subdataset : str, optional
@@ -622,8 +627,7 @@ def bbox_to_window(slc_path: Union[str, Path], wsen,
     Returns
     -------
     (x0, y0, w, h) in the SLC pixel grid, or None when the bbox does not
-    intersect the SLC.  Raises ValueError for a non-geocoded (isce2 radar)
-    input: read-time cropping requires a georeferenced SLC.
+    intersect the SLC.
     """
     import math
 
@@ -642,21 +646,22 @@ def bbox_to_window(slc_path: Union[str, Path], wsen,
         r0, r1, c0, c1 = win_info['window']
         return (c0, r0, c1 - c0, r1 - r0)
 
-    if not is_gdal_file(slc_path):
-        raise ValueError(
-            f'bbox read-time crop requires geocoded SLCs (isce3 GeoTIFF/HDF5), '
-            f'got {slc_path} - enable the crop_slc stage for isce2 radar')
+    gt = proj = None
+    cols = rows = 0
+    if is_gdal_file(slc_path):
+        from osgeo import gdal
+        ds = gdal.Open(slc_path, gdal.GA_ReadOnly)
+        if ds is None:
+            raise RuntimeError(f'Cannot open SLC: {slc_path}')
+        try:
+            gt = get_geotransform(ds)
+            proj = ds.GetProjection() if gt is not None else ''
+            cols, rows = ds.RasterXSize, ds.RasterYSize
+        finally:
+            ds = None
 
-    from osgeo import gdal, osr
-    ds = gdal.Open(slc_path, gdal.GA_ReadOnly)
-    if ds is None:
-        raise RuntimeError(f'Cannot open SLC: {slc_path}')
-    try:
-        gt = get_geotransform(ds)
-        if gt is None:
-            raise ValueError(f'No geotransform in {slc_path}; cannot map bbox to pixels')
-        cols, rows = ds.RasterXSize, ds.RasterYSize
-        proj = ds.GetProjection()
+    if gt is not None:
+        from osgeo import osr
         if not proj:
             raise ValueError(f'No projection in {slc_path}; cannot map bbox to pixels')
         src_srs = osr.SpatialReference()
@@ -691,5 +696,17 @@ def bbox_to_window(slc_path: Union[str, Path], wsen,
         if x0 >= x1 or y0 >= y1:
             return None
         return (x0, y0, x1 - x0, y1 - y0)
-    finally:
-        ds = None
+
+    # isce2 radar coordinates (no georeferencing): the SLC shares the radar
+    # grid of the standard merged geometry, so the AOI maps to rows/cols via
+    # lat.rdr.full / lon.rdr.full under <merged>/geom_reference.
+    from .utils.slc_input import standard_geom_dir
+    geom = standard_geom_dir(slc_path)
+    if geom is None:
+        raise ValueError(
+            f'cannot map bbox to {slc_path}: not georeferenced and no standard '
+            f'ISCE2 <merged>/geom_reference (lat.rdr.full / lon.rdr.full) found')
+    from .crop_slc import find_crop_window_from_full_files
+    min_row, max_row, min_col, max_col = find_crop_window_from_full_files(
+        str(geom / 'lon.rdr.full'), str(geom / 'lat.rdr.full'), crop_bounds)
+    return (min_col, min_row, max_col - min_col + 1, max_row - min_row + 1)

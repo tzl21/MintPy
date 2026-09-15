@@ -135,6 +135,15 @@ def test_crop_isce2_geoless_tif_and_envi_geometry(tmp_path):
     assert (out_geom / 'lat.rdr.full.xml').is_file()
 
 
+def test_bbox_to_window_isce2_radar(tmp_path):
+    """A geoless isce2 SLC maps the bbox through <merged>/geom_reference."""
+    merged, slc_dir = _make_radar_inputs(tmp_path)
+    slc = slc_dir / '20200102' / '20200102.slc.full'
+    # bbox over cols 3..5 / rows 4..6 -> 1-px margin -> (x0, y0, w, h)
+    window = sio.bbox_to_window(slc, (100.003, 29.994, 100.005, 29.996))
+    assert window == (2, 3, 5, 5)
+
+
 def test_crop_isce2_out_of_bbox(tmp_path):
     merged, slc_dir = _make_radar_inputs(tmp_path)
     out_dir = tmp_path / 'cropped'
