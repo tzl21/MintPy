@@ -100,10 +100,23 @@ def test_generate_pairs_sequential_exclude():
     assert check_connected(kept, pairs)
 
 
-def test_generate_pairs_select_exclude():
-    kept = [d for d in DATES if d != '20230129']
+def test_generate_pairs_select_exclude(tmp_path):
+    """select mode: the excluded date never appears in any selected pair."""
+    from osgeo import gdal
+    kept = ['20230105', '20230117', '20230210']   # 20230129 excluded
+
+    # real (small) coherence rasters for every candidate pair
+    for a, b in (('20230105', '20230117'), ('20230105', '20230210'),
+                 ('20230117', '20230210')):
+        d = tmp_path / f'{a}_{b}'
+        d.mkdir(parents=True, exist_ok=True)
+        ds = gdal.GetDriverByName('GTiff').Create(
+            str(d / 'filt_mli.phsig.coh.tif'), 8, 8, 1, gdal.GDT_Float32)
+        ds.GetRasterBand(1).Fill(0.6)
+        ds = None
+
     pairs = generate_pairs(kept, mode='select', num_connections=3,
-                           select_params={'weight_source': 'model',
+                           select_params={'coh_root': str(tmp_path),
                                           'min_degree': 2})
     flat = [d for p in pairs for d in p]
     assert '20230129' not in flat
@@ -185,7 +198,11 @@ def test_basic_executor_exclude_date(tmp_path):
         'slc2ifg.ifgram_list.num_connections': '3',
         'slc2ifg.ifgram_list.exclude_date': '20220129',
     }
-    ex._run_ifgram_list(slc_dir, out)
+    from mintpy.stdproc.utils.slc_input import resolve_slc_input
+    state = resolve_slc_input(str(slc_dir))
+    all_dates = state.date_list()
+    slc_files = {d: state.file_for(None, d) for d in all_dates}
+    ex._run_ifgram_list(all_dates, out, slc_files=slc_files)
     pairs = _read_pairs(out / 'ifgram_list.txt')
     flat = [d for p in pairs for d in p]
     assert '20220129' not in flat
@@ -194,11 +211,10 @@ def test_basic_executor_exclude_date(tmp_path):
 
 
 # ------------------------------------------------------------------------
-# crop file list: non-date assets must be kept, only excluded dates dropped
-# (regression: a date filter used to silently drop files whose name has no
-# date pattern, e.g. static_layers_*.h5 — see engine._add_crop_node)
+# crop file list: only the excluded date is dropped
+# (see engine._add_crop_node)
 # ------------------------------------------------------------------------
-def test_engine_crop_keeps_non_date_files_and_excludes(tmp_path):
+def test_engine_crop_drops_excluded_date(tmp_path):
     from mintpy.stdproc.engine.config import load_engine_config
     from mintpy.stdproc.engine.engine import Engine
 
@@ -209,15 +225,12 @@ def test_engine_crop_keeps_non_date_files_and_excludes(tmp_path):
         dd = inp / d
         dd.mkdir()
         (dd / f't124_264305_iw2_{d}.h5').touch()
-    # non-date static asset living in a date dir (real-world layout)
-    (inp / '20220105' / 'static_layers_t124_264305_iw2.h5').touch()
 
     cfg = tmp_path / 'mini.cfg'
     cfg.write_text(
         f'slc2ifg.work_dir = {tmp_path}\n'
         f'slc2ifg.slc_input = {inp}\n'
         'slc2ifg.processor = isce3\n'
-        'slc2ifg.crop_slc.pattern = **/*.h5\n'
         'engine.max_workers = 2\n'
         'engine.gpu = false\n'
         'engine.tools = crop_slc,ifgram_list,generate_ifgram\n'
@@ -231,9 +244,8 @@ def test_engine_crop_keeps_non_date_files_and_excludes(tmp_path):
     lst = tmp_path / 'engine' / 'crop_file_list.txt'
     assert lst.exists()
     lines = [line for line in lst.read_text().splitlines() if line.strip()]
-    # 5 date SLCs - 1 excluded + 1 static file = 5 files kept
-    assert len(lines) == len(dates)
+    # 5 date SLCs - 1 excluded = 4 files kept
+    assert len(lines) == len(dates) - 1
     names = [Path(line).name for line in lines]
     assert 't124_264305_iw2_20220129.h5' not in names
-    assert 'static_layers_t124_264305_iw2.h5' in names
     assert 't124_264305_iw2_20220105.h5' in names

@@ -35,23 +35,16 @@ class GenerateIfgramTool(Tool):
                Port('pair_dir', 'dir')]
     resource = Resource(device='cpu', mem_estimate_gb=2.0)
     params_spec = [
-        # unified SLC pattern; legacy generate_ifgram.slc_pattern as fallback
-        ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.slc_pattern'),
-        ParamSpec('subdataset', cfg='slc2ifg.subdataset',
-                  default='/data/VV'),
-        ParamSpec('no_verify', cfg='slc2ifg.generate_ifgram.no_verify',
-                  kind='bool', default=False),
+        # The HDF5 subdataset is auto-detected (/data/[VV,VH,HH], preferring
+        # VV) and the SLC pattern is inferred from slc2ifg.slc_input.
         ParamSpec('only_vrt', cfg='slc2ifg.generate_ifgram.only_vrt',
                   kind='bool', default=False),
         # Read-time crop (AOI): with the crop_slc stage absent, materialise
         # each interferogram only over this bbox — no cropped SLC files are
         # stored.  The engine pops these params when crop_slc is enabled
         # (the SLCs are then already cropped).
-        ParamSpec('bbox', cfg='slc2ifg.bbox',
-                  legacy_cfg='slc2ifg.bbox'),
+        ParamSpec('bbox', cfg='slc2ifg.bbox'),
         ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer',
-                  legacy_cfg='slc2ifg.bbox_buffer',
                   kind='float', default=0.0),
     ]
 
@@ -64,19 +57,20 @@ class GenerateIfgramTool(Tool):
             find_slc_file_by_date,
             process_single_pair,
         )
-        from mintpy.stdproc.utils import naming
 
         processor = ctx.param('processor')
-        slc_pattern = ctx.param('slc_pattern', naming.slc_pattern(processor))
-        slc_dir = Path(ctx.input('slc_dir'))
+        raw_dirs = ctx.input('slc_dir')
+        slc_dirs = [Path(d) for d in (raw_dirs if isinstance(raw_dirs, (list, tuple))
+                                      else [raw_dirs])]
+        slc_pattern = ctx.param('slc_pattern') or self._infer_pattern(slc_dirs)
         d1, d2 = str(ctx.input('date1')), str(ctx.input('date2'))
 
-        slc1 = find_slc_file_by_date([slc_dir], d1, slc_pattern, processor)
-        slc2 = find_slc_file_by_date([slc_dir], d2, slc_pattern, processor)
+        slc1 = find_slc_file_by_date(slc_dirs, d1, slc_pattern, processor)
+        slc2 = find_slc_file_by_date(slc_dirs, d2, slc_pattern, processor)
         if slc1 is None:
-            raise FileNotFoundError(f"SLC for date {d1} not found in {slc_dir}")
+            raise FileNotFoundError(f"SLC for date {d1} not found in {slc_dirs}")
         if slc2 is None:
-            raise FileNotFoundError(f"SLC for date {d2} not found in {slc_dir}")
+            raise FileNotFoundError(f"SLC for date {d2} not found in {slc_dirs}")
 
         pair_dir = ctx.output('pair_dir')
         pair_dir.mkdir(parents=True, exist_ok=True)
@@ -90,7 +84,7 @@ class GenerateIfgramTool(Tool):
             from mintpy.stdproc import io as sio
             window = sio.bbox_to_window(
                 slc1, sio.parse_wsen(str(bbox)),
-                ctx.param('subdataset', '/data/VV'),
+                None,  # subdataset auto-detected
                 float(ctx.param('bbox_buffer', 0.0) or 0.0))
             if window is None:
                 raise RuntimeError(
@@ -99,8 +93,8 @@ class GenerateIfgramTool(Tool):
 
         pair_info = (
             f"{d1}-{d2}", d1, d2, slc1, slc2, vrt_path, ifg_path,
-            not ctx.param('no_verify', False),
-            ctx.param('subdataset', '/data/VV'),
+            True,           # verify SLCs (dimension check)
+            None,           # subdataset auto-detected from the HDF5 file
             processor,
             ctx.param('only_vrt', False),
             window,
@@ -111,3 +105,11 @@ class GenerateIfgramTool(Tool):
         ctx.logger.info("generate_ifgram %s: %s %s", date12, msg,
                         ctx.elapsed_str())
         return {'ifg': ifg_path, 'pair_dir': pair_dir}
+
+    @staticmethod
+    def _infer_pattern(slc_dirs) -> str:
+        """Infer the SLC filename pattern from the files in ``slc_dirs``."""
+        from mintpy.stdproc.utils.slc_input import (infer_slc_pattern,
+                                                    _walk_slc_files)
+        names = [f.name for d in slc_dirs for f in _walk_slc_files(Path(d))]
+        return infer_slc_pattern(names) if names else '*.slc.*'

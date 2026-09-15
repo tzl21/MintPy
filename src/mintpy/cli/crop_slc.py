@@ -15,10 +15,6 @@ logger = logging.getLogger(__name__)
 EXAMPLE = """example:
   # ISCE3 (geocoded) input
   crop_slc.py --processor isce3 --input-dir ./slc --output-dir ./cropped --bbox 102.8 27.3 103.3 27.6
-
-  # ISCE2 (radar coordinates) input: geometry dir required
-  crop_slc.py --processor isce2 --input-dir './SLC/*/' --pattern '*.slc' \\
-      --output-dir ./cropped --bbox 102.8 27.3 103.3 27.6 --geom-dir ./geom_reference
 """
 
 
@@ -42,11 +38,6 @@ def create_parser(subparsers=None):
                         help='Input SLC glob (default: processor raw pattern)')
     parser.add_argument('--buffer', type=float, default=0.0,
                         help='Buffer in degrees around the bbox (default: %(default)s)')
-    parser.add_argument('--geom-dir',
-                        help='ISCE2 full-resolution geometry dir (lat/lon.rdr.full); required for isce2')
-    parser.add_argument('--prefix', default='', help='Output filename prefix')
-    parser.add_argument('--subdataset', default='/data/VV',
-                        help='HDF5 subdataset (default: %(default)s)')
     parser.add_argument('--max-workers', type=int, default=1,
                         help='Number of parallel crop workers (default: %(default)s)')
     parser.add_argument('--by-burst', action='store_true',
@@ -70,8 +61,9 @@ def create_parser(subparsers=None):
 def cmd_line_parse(iargs=None):
     parser = create_parser()
     inps = parser.parse_args(args=iargs)
-    if inps.processor == 'isce2' and not inps.geom_dir:
-        parser.error('--geom-dir is required for isce2 (radar-coordinate) cropping')
+    if inps.processor == 'isce2':
+        parser.error('bbox cropping requires geocoded (isce3) SLCs; isce2 '
+                     'radar-coordinate SLCs have no georeferencing to crop by bbox')
     return inps
 
 
@@ -91,11 +83,9 @@ def main(iargs=None):
         processor=inps.processor,
         pattern=inps.pattern,
         buffer=inps.buffer,
-        geom_dir=inps.geom_dir,
-        prefix=inps.prefix,
         by_burst=inps.by_burst,
         file_list=inps.file_list,
-        subdataset=inps.subdataset,
+        subdataset=None,   # auto-detected (/data/[VV,VH,HH], preferring VV)
         workers=inps.max_workers,
         no_skip_existing=inps.no_skip_existing,
         no_burst_dirs=inps.no_burst_dirs,

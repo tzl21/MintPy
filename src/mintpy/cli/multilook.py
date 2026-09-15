@@ -7,9 +7,7 @@
 
 
 import logging
-import os
 import sys
-from pathlib import Path
 
 from mintpy.utils.arg_utils import create_argument_parser
 
@@ -30,10 +28,6 @@ EXAMPLE = """example:
   # slc2ifg batch mode: multilook every interferogram in a directory
   multilook.py --processor isce3 --input-dir ./ifgrams --pattern '**/*.int.tif' \\
       --output-dir ./mli --lks-y 4 --lks-x 4
-
-  # slc2ifg batch mode: multilook the isce2 geometry files as well
-  multilook.py --processor isce2 --input-dir ./ifgrams --pattern '**/*.int' \\
-      --output-dir ./mli --lks-y 4 --lks-x 4 --geom-dir ./geom_reference
 """
 
 
@@ -79,11 +73,6 @@ def create_parser(subparsers=None):
     batch.add_argument('--output-dir', help='Output directory for batch mode')
     batch.add_argument('--max-workers', type=int, default=4,
                        help='Number of parallel workers in batch mode (default: %(default)s)')
-    batch.add_argument('--geom-dir', help='Geometry directory (.full files) to multilook as well')
-    batch.add_argument('--output-geom-dir', help='Output directory for the multilooked geometry')
-    batch.add_argument('--ref-file', help='Reference file for geometry dimension matching')
-    batch.add_argument('--geom-only', action='store_true',
-                       help='Only multilook the geometry files, skip the interferograms')
     batch.add_argument('--no-skip-existing', action='store_true',
                        help='Recompute existing outputs in batch mode')
     batch.add_argument('-v', '--verbose', action='store_true', help='Verbose logging')
@@ -119,27 +108,8 @@ def cmd_line_parse(iargs=None):
 ##################################################################################################
 def _run_batch(inps):
     """Directory-driven multilooking for the slc2ifg pipeline."""
-    from mintpy.stdproc.multilook import process_batch_files, process_geometry_files
+    from mintpy.stdproc.multilook import process_batch_files
 
-    if inps.geom_dir:
-        if not os.path.isdir(inps.geom_dir):
-            raise FileNotFoundError(f'Geometry directory not found: {inps.geom_dir}')
-        if inps.ref_file:
-            reference_file = inps.ref_file
-        else:
-            input_files = sorted(Path(inps.input_dir).glob(inps.pattern))
-            if not input_files:
-                raise FileNotFoundError(
-                    f'No files found in {inps.input_dir} matching pattern {inps.pattern}')
-            reference_file = str(input_files[0])
-        geom_output_dir = process_geometry_files(
-            geom_dir=inps.geom_dir, input_file=reference_file,
-            lks_y=inps.lks_y, lks_x=inps.lks_x,
-            output_geom_dir=inps.output_geom_dir, processor=inps.processor)
-        logger.info('geometry multilook output: %s', geom_output_dir)
-
-    if inps.geom_only:
-        return 0
     if not inps.output_dir:
         raise SystemExit('--output-dir is required in batch mode')
     process_batch_files(inps)

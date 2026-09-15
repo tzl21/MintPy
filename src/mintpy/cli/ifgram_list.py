@@ -94,12 +94,6 @@ def create_parser(subparsers=None):
     select_group = parser.add_argument_group(
         'Selection parameters (mode=select) — coherence-aware connected '
         'selection (see docs/ifgram_list_modes.md)')
-    select_group.add_argument('--select-weight-source', dest='select_weight_source',
-                             choices=['model', 'coherence', 'mixed'], default=None,
-                             help='Quality source: model (temporal decorrelation), '
-                                  'coherence (measured: existing rasters or quick '
-                                  'coherence on downsampled SLCs), mixed (measured '
-                                  'with model fallback) (default: model)')
     select_group.add_argument('--select-annual-windows', dest='select_annual_windows',
                              default=None,
                              help='Temporal windows as "center:tol" day pairs, comma '
@@ -113,24 +107,6 @@ def create_parser(subparsers=None):
     select_group.add_argument('--select-perp-baseline-file', dest='select_perp_baseline_file',
                              default=None,
                              help='Two-column "date bperp" text file (None = off)')
-    select_group.add_argument('--select-coh-dir', dest='select_coh_dir', default=None,
-                             help='Existing coherence rasters dir ({date1}_{date2}/xxx_coh) '
-                                  '(None = use quick coherence from SLCs)')
-    select_group.add_argument('--select-coh-kind', dest='select_coh_kind',
-                             choices=['phsig', 'cpx'], default=None,
-                             help='Coherence kind for existing rasters (default: phsig)')
-    select_group.add_argument('--select-coh-variant', dest='select_coh_variant',
-                             choices=['fullres', 'mli', 'filt', 'filt_mli'], default=None,
-                             help='Coherence variant for existing rasters (default: filt_mli)')
-    select_group.add_argument('--select-coh-stat', dest='select_coh_stat',
-                             choices=['mean', 'median', 'usable_frac', 'fisher'], default=None,
-                             help='Statistic aggregating a coherence map (default: mean)')
-    select_group.add_argument('--select-coh-usable-threshold', dest='select_coh_usable_threshold',
-                             type=float, default=None,
-                             help='Threshold for stat=usable_frac (default: 0.3)')
-    select_group.add_argument('--select-quick-window', dest='select_quick_window',
-                             type=int, default=None,
-                             help='Coherence window for quick coherence (default: 5)')
     select_group.add_argument('--select-quick-nlks', dest='select_quick_nlks',
                              type=int, default=None,
                              help='Block-mean downsampling factor of the --bbox window '
@@ -141,21 +117,12 @@ def create_parser(subparsers=None):
     select_group.add_argument('--select-quick-max-workers', dest='select_quick_max_workers',
                              type=int, default=None,
                              help='Threads for on-the-fly coherence (default: 1 = serial)')
-    select_group.add_argument('--select-model-tau-days', dest='select_model_tau_days',
-                             type=float, default=None,
-                             help='Temporal decorrelation time constant in days (default: 90)')
-    select_group.add_argument('--select-model-gamma0', dest='select_model_gamma0',
-                             type=float, default=None,
-                             help='Coherence at zero temporal baseline (default: 1.0)')
     select_group.add_argument('--select-min-degree', dest='select_min_degree',
                              type=int, default=None,
                              help='Minimum interferograms per date (default: 2; 0/1 = pure spanning tree)')
     select_group.add_argument('--select-max-pairs', dest='select_max_pairs',
                              type=int, default=None,
                              help='Global edge budget (None = unbounded)')
-    select_group.add_argument('--select-quality-threshold', dest='select_quality_threshold',
-                             type=float, default=None,
-                             help='Augmentation floor on the quality weight (default: 0.0)')
     select_group.add_argument('--select-robust', dest='select_robust',
                              type=_str2bool, metavar='{true,false}', default=None,
                              help='Repair bridges with highest-weight crossings, 2-edge '
@@ -164,7 +131,6 @@ def create_parser(subparsers=None):
                              help='Write the selection report JSON to this path (None = off)')
     select_group.add_argument('--select-dot', dest='select_dot', default=None,
                              help='Write the selected network as GraphViz DOT to this path (None = off)')
-    return parser
     return parser
 
 

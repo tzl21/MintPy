@@ -34,12 +34,12 @@ class UnwrapTool(Tool):
     # `legacy_cfg` keeps the old flat keys working with a deprecation warning.
     params_spec = [
         ParamSpec('algorithm', cfg='slc2ifg.unwrap.algorithm', default='snaphu'),
-        #: Coherence input type: auto | complex | phsig | external | none.
+        #: Coherence input type: auto | complex | phsig | none.
         #: auto = phsig if the phsig_coh stage is enabled, else complex if
-        #: complex_coh is enabled (fullres only), else none; none = SNAPHU
-        #: runs with weight 1 (uniform, no coherence file).  'external' is
-        #: set by the engine when slc2ifg.coh_dir/coh_pattern supply
-        #: the coherence raster (the file is passed via the 'coh' input port).
+        #: complex_coh is enabled (fullres only), else a coherence raster
+        #: auto-discovered under <work_dir>/ifgrams, else none; none = SNAPHU
+        #: runs with weight 1 (uniform, no coherence file).  The resolved
+        #: raster is passed via the 'coh' input port.
         ParamSpec('coh_type', cfg='slc2ifg.unwrap.coh_type', default='auto'),
         ParamSpec('cost_mode', cfg='slc2ifg.unwrap.snaphu.cost_mode',
                   legacy_cfg='slc2ifg.unwrap.cost_mode', default='smooth'),
@@ -52,7 +52,8 @@ class UnwrapTool(Tool):
         ParamSpec('keep_scratch', cfg='slc2ifg.unwrap.snaphu.keep_scratch',
                   legacy_cfg='slc2ifg.unwrap.keep_scratch',
                   kind='bool', default=False),
-        ParamSpec('mask_file', cfg='slc2ifg.mask',
+        #: Optional unwrap mask (nonzero = valid, 0 = excluded).
+        ParamSpec('mask_file', cfg='slc2ifg.unwrap.mask_file',
                   ),
         # Unwrap algorithm switch: snaphu (built-in) | phass | icu (requires
         # third-party packages; skeleton)
@@ -120,7 +121,8 @@ class StitchTool(Tool):
     outputs = [Port('stitched', 'file')]
     resource = Resource(device='cpu', mem_estimate_gb=3.0)
     params_spec = [
-        ParamSpec('out_bounds', cfg='slc2ifg.stitch.out_bounds'),
+        # output extent follows slc2ifg.bbox (None = the full burst union)
+        ParamSpec('bbox', cfg='slc2ifg.bbox'),
         ParamSpec('overwrite', cfg=None, kind='bool', default=True),
     ]
 
@@ -151,7 +153,7 @@ class StitchTool(Tool):
                 "UTM zone 5N (verify the product CRS for data outside "
                 "zone 5N)", ctx.tool_name)
 
-        out_bounds = self._parse_bounds(ctx.param('out_bounds'))
+        out_bounds = self._parse_bounds(ctx.param('bbox'))
         ok = stitch_date_pair(file_list, out, out_bounds, overwrite, epsg_utm)
         if not ok:
             raise RuntimeError(f"stitch failed for {out}")

@@ -14,9 +14,11 @@ Fixed output structure (see ``utils.naming``):
     ``output_dir/{date1}_{date2}/fullres.int[.tif]``
     ``output_dir/{date1}_{date2}/fullres.cpx.coh[.tif]``
 
-When ``--out-bounds`` is NOT given, the output covers the *complete* union
+When ``--bbox`` is NOT given, the output covers the *complete* union
 extent of all bursts (full-track stitching).  When given, results are
-clipped to the requested ``W S E N`` bbox (EPSG:4326).
+clipped to the requested ``W S E N`` bbox (EPSG:4326).  The file types to
+stitch are auto-detected from the input tree (wrapped interferograms and
+complex coherence).
 """
 
 import argparse
@@ -35,6 +37,23 @@ from .utils.stitching_utils import stitch_arrays, _write_geotiff
 gdal.UseExceptions()
 
 logger = logging.getLogger(__name__)
+
+#: file types stitched by default: wrapped interferogram + complex coherence
+DEFAULT_FILE_TYPES: Tuple[str, ...] = ('.int.tif', '.cpx.coh.tif')
+
+
+def detect_file_types(root_dir: Path) -> List[str]:
+    """Detect the stitchable file types present under ``root_dir``.
+
+    The default stitch targets are the wrapped interferogram (``.int.tif``)
+    and the complex coherence (``.cpx.coh.tif``); both are probed and only the
+    types that actually exist are returned.
+    """
+    root = Path(root_dir)
+    if not root.exists():
+        return []
+    return [ft for ft in DEFAULT_FILE_TYPES
+            if next(root.glob(f'**/*{ft}'), None) is not None]
 
 
 def discover_burst_dirs(root_dir: Path) -> List[Path]:
@@ -109,12 +128,12 @@ def stitch_all(args: argparse.Namespace) -> int:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    out_bounds = tuple(args.out_bounds) if args.out_bounds else None
+    out_bounds = tuple(args.bbox) if getattr(args, 'bbox', None) else None
     if out_bounds:
         logger.info(f"Output bounds (EPSG:4326): W={out_bounds[0]:.6f} S={out_bounds[1]:.6f} "
                      f"E={out_bounds[2]:.6f} N={out_bounds[3]:.6f}")
     else:
-        logger.info("No --out-bounds given: stitching the COMPLETE union extent of all bursts.")
+        logger.info("No --bbox given: stitching the COMPLETE union extent of all bursts.")
 
     total_success = 0
     total_failed = 0
@@ -130,10 +149,17 @@ def stitch_all(args: argparse.Namespace) -> int:
             logger.info(f"No burst directories in {root_dir}, treating as flat")
             burst_dirs = [root_dir]
 
+        file_types = list(args.file_types) if getattr(args, 'file_types', None) else \
+            detect_file_types(root_dir)
+        if not file_types:
+            logger.warning(f"No stitchable files found in {root_dir}")
+            continue
+        logger.info(f"Stitching file type(s): {', '.join(file_types)}")
+
         epsg_utm = 32605
         detected = False
         for bd in burst_dirs:
-            for ft in args.file_types:
+            for ft in file_types:
                 candidates = list(bd.glob(f"**/*{ft}"))
                 if candidates:
                     epsg = get_file_epsg(candidates[0])
@@ -144,7 +170,7 @@ def stitch_all(args: argparse.Namespace) -> int:
             if detected:
                 break
 
-        grouped = group_files_by_date_pair(burst_dirs, args.file_types)
+        grouped = group_files_by_date_pair(burst_dirs, file_types)
         if not grouped:
             logger.warning(f"No files found in {root_dir}")
             continue

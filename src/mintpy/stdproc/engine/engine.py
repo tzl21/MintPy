@@ -50,10 +50,23 @@ from mintpy.stdproc.engine.tool import (
     gpu_tools,
 )
 from mintpy.stdproc.utils import naming
+from mintpy.stdproc.utils.coherence import find_coh_raster
+from mintpy.stdproc.utils.slc_input import SlcInput, resolve_slc_input
 
 logger = logging.getLogger(__name__)
 
-_BURST_RE = re.compile(r'^t\d+_\d+_iw\d+$')
+
+def _make_slc_input(config) -> Optional[SlcInput]:
+    """Resolve ``slc2ifg.slc_input`` (path or glob) into a SlcInput.
+
+    Returns None (with a warning) when the pattern matches no SLC file, so a
+    mid-chain-entry run that starts from existing products still works.
+    """
+    try:
+        return resolve_slc_input(config.slc_input, processor=config.processor)
+    except ValueError as exc:
+        logger.warning("slc_input unavailable: %s", exc)
+        return None
 
 
 def _legacy_opt(cfg, new_key: str, legacy_key: str, kind: str,
@@ -85,19 +98,18 @@ def _legacy_opt(cfg, new_key: str, legacy_key: str, kind: str,
 
 
 def discover_bursts(slc_dir: Path) -> List[Optional[str]]:
-    """Scan ``slc_dir`` for burst subdirectories (``tXXX_XXXXXX_iwX``).
+    """Deprecated shim: burst ids of ``slc_dir`` via the slc_input resolver.
 
     Returns ``[None]`` for single-burst (flat) mode.
     """
+    slc_dir = Path(slc_dir)
     if not slc_dir.is_dir():
         return [None]
-    bursts = sorted(
-        e.name for e in slc_dir.iterdir()
-        if e.is_dir() and _BURST_RE.match(e.name))
-    if bursts:
-        logger.info("Discovered %d burst(s): %s", len(bursts), bursts)
-        return bursts
-    return [None]
+    try:
+        state = resolve_slc_input(str(slc_dir))
+    except ValueError:
+        return [None]
+    return state.bursts
 
 
 class Engine:
@@ -105,7 +117,10 @@ class Engine:
 
     def __init__(self, config: EngineConfig):
         self.config = config
-        self.slc_input = Path(config.slc_input)
+        #: raw slc2ifg.slc_input (path or glob), kept for logging / crop
+        self.slc_input = config.slc_input
+        #: resolved SLC inventory (None when the pattern matches no SLC)
+        self.slc = _make_slc_input(config)
         self.processor = config.processor
 
         self.ifgram_dir = config.ifgram_out_dir
@@ -160,13 +175,12 @@ class Engine:
                     "engine: 'crop_slc' cannot run in mid-chain entry mode "
                     "(it transforms SLCs and requires generate_ifgram)")
             # complex_coh reads SLCs directly — allowed in entry mode when a
-            # usable SLC directory is configured (honours slc2ifg.slc_pattern).
+            # usable slc_input (path or glob) is configured.
             if 'complex_coh' in chain_names and not self._entry_slcs_available():
                 raise ValueError(
                     "engine: 'complex_coh' in mid-chain entry mode needs SLC "
-                    "inputs — point slc2ifg.slc_input at a directory "
-                    "containing SLC files matching slc2ifg.slc_pattern, or "
-                    "drop complex_coh")
+                    "inputs — point slc2ifg.slc_input at a directory or glob "
+                    "matching the SLC files, or drop complex_coh")
             # Pair planning is explicit when the user lists 'ifgram_list' in
             # engine.stages, or hands in a pair list
             # (slc2ifg.ifgram_list.pair_file): its output then defines the
@@ -205,10 +219,14 @@ class Engine:
             return self._build_entry_graph(g, chain, plan_pairs=plan_pairs)
 
         # --- optional crop step: transforms the input SLC directory ---
-        slc_base = self.slc_input
         has_crop = 'crop_slc' in chain_names
+        if self.slc is None:
+            raise ValueError(
+                f"engine: no SLC found for slc2ifg.slc_input={self.slc_input!r} "
+                f"(is it a valid path or glob?)")
+        crop_dir: Optional[Path] = None
         if has_crop:
-            slc_base = self._add_crop_node(g)
+            crop_dir = self._add_crop_node(g)
 
         # Read-time crop mode (default): with crop_slc absent, generate_ifgram
         # reads only the slc2ifg.bbox region from the SLCs — no cropped SLC
@@ -216,17 +234,16 @@ class Engine:
         # mode requires the crop_slc stage.
         if not has_crop:
             from mintpy.stdproc.engine.config import get_opt
-            bbox_raw = (get_opt(self.config.raw, 'slc2ifg.bbox')
-                        or get_opt(self.config.raw, 'slc2ifg.bbox'))
+            bbox_raw = get_opt(self.config.raw, 'slc2ifg.bbox')
             if bbox_raw and self.processor == 'isce2':
                 raise ValueError(
                     "engine: slc2ifg.bbox read-time crop requires geocoded "
                     "SLCs (isce3 GeoTIFF/HDF5) — for isce2 enable the "
                     "'crop_slc' stage instead")
 
-        bursts = discover_bursts(slc_base)
-        multi = len(bursts) > 1
-        burst_ids: List[Optional[str]] = bursts if multi else [None]
+        bursts_all = self.slc.bursts
+        multi = len([b for b in bursts_all if b is not None]) > 1
+        burst_ids: List[Optional[str]] = bursts_all if multi else [None]
         logger.info("Mode: %s", "multi-burst" if multi else "single-burst")
 
         # ---------------- Phase 1: per-burst ----------------
@@ -236,7 +253,15 @@ class Engine:
         do_cpx = 'complex_coh' in chain_names
 
         for b in burst_ids:
-            slc_dir = slc_base / b if b else slc_base
+            # actual burst whose directories are scanned/read (a single burst
+            # keeps the flat, un-nested output layout for compatibility)
+            src_burst = b if multi else bursts_all[0]
+            if has_crop:
+                # the cropped tree mirrors the input burst layout but does not
+                # exist yet at graph-construction time: <crop_dir>/[<burst>/]
+                slc_dirs = [crop_dir / src_burst] if multi else [crop_dir]
+            else:
+                slc_dirs = self.slc.dirs(src_burst)
             ifg_out = self.ifgram_dir / b if b else self.ifgram_dir
             ifg_out.mkdir(parents=True, exist_ok=True)
 
@@ -244,15 +269,18 @@ class Engine:
             # When cropping is enabled, discover dates from the *input* SLC dir
             # (the cropped dir only exists after the crop step executes; the
             # date sets are identical after filtering).
-            scan_dir = self.slc_input if has_crop else slc_dir
-            pair_file = self._run_ifgram_list(scan_dir, ifg_out)
+            scan_state = self.slc
+            dates = scan_state.date_list(src_burst) if scan_state else []
+            slc_files = ({d: scan_state.file_for(src_burst, d) for d in dates}
+                         if scan_state else {})
+            pair_file = self._run_ifgram_list(dates, ifg_out, slc_files=slc_files)
             pair_files[b] = pair_file
 
             pairs = self._read_pairs(pair_file)
             for d1, d2 in pairs:
                 dp = f"{d1}_{d2}"
                 key = f"generate_ifgram#{b or 'single'}#{dp}"
-                node = self._make_generate_ifgram_node(key, b, slc_dir, ifg_out,
+                node = self._make_generate_ifgram_node(key, b, slc_dirs, ifg_out,
                                                        d1, d2, pair_file,
                                                        read_crop=not has_crop)
                 g.add_node(node)
@@ -262,7 +290,7 @@ class Engine:
 
                 if do_cpx:
                     ckey = f"complex_coh#{b or 'single'}#{dp}"
-                    cnode = self._make_complex_coh_node(ckey, b, slc_dir, ifg_out,
+                    cnode = self._make_complex_coh_node(ckey, b, slc_dirs, ifg_out,
                                                         d1, d2, pair_file,
                                                         read_crop=not has_crop)
                     g.add_node(cnode)
@@ -294,7 +322,7 @@ class Engine:
             if not all_pairs:
                 all_pairs = set(self._read_pairs(phase3_pair_file))
             if pair_files and len(all_pairs) != len(
-                    self._read_pairs(pair_files.get(bursts[0])
+                    self._read_pairs(pair_files.get(bursts_all[0])
                                      or phase3_pair_file)):
                 logger.info("Phase 3 uses the union of %d burst pair list(s): "
                             "%d pair(s) (per-burst date sets differ)",
@@ -331,10 +359,11 @@ class Engine:
            re-run from the SLC acquisition dates and its output defines the
            pairs (``mode`` / ``select.*`` / date filters are honoured),
            even though it is not a DAG node.
-        2. **the product tree** — ``input_dir/ifgram_list.txt`` or the
-           ``input_dir/{date1}_{date2}/`` directories.  The entry stages then
-           consume ``{input_variant}.int[.tif]`` per pair, so the first stage
-           depends only on files already on disk.
+        2. **the product tree** — ``<work_dir>/ifgrams/ifgram_list.txt`` or the
+           ``<work_dir>/ifgrams/{date1}_{date2}/`` directories.  The entry
+           stages then consume ``{variant}.int[.tif]`` per pair (the variant is
+           auto-detected, preferring the most-processed one), so the first
+           stage depends only on files already on disk.
         3. **the SLC dates** — only for a ``complex_coh``-only chain whose
            product tree is empty/absent: the coherence is computed directly
            from the SLCs, so the pair list is generated from the SLC
@@ -342,9 +371,9 @@ class Engine:
            pipeline.
         """
         chain_names = [s.name for s in chain]
-        variant = self._entry_variant()
-        slc_only = all(name == 'complex_coh' for name in chain_names)
         input_root = self._entry_input_root()
+        variant = self._entry_variant(input_root)
+        slc_only = all(name == 'complex_coh' for name in chain_names)
         pair_file = None
         pairs: List[Tuple[str, str]] = []
         slc_pairs = False
@@ -358,14 +387,12 @@ class Engine:
                 raise ValueError(
                     f"engine: 'ifgram_list' (engine.stages) selected no pairs "
                     f"from the SLC directory {self.slc_input} — check "
-                    f"slc2ifg.ifgram_list.*, slc2ifg.slc_pattern and the date "
-                    f"filters")
+                    f"slc2ifg.ifgram_list.* and the date filters")
         elif plan_pairs:
             logger.warning(
                 "engine: engine.stages lists 'ifgram_list' but slc_input=%s "
-                "has no SLC matching slc2ifg.slc_pattern — keeping the "
-                "existing pair list under input_dir=%s", self.slc_input,
-                input_root)
+                "has no SLC — keeping the existing pair list under "
+                "input_dir=%s", self.slc_input, input_root)
 
         # 2) product tree: an existing {root}/{date1}_{date2}/ tree (or an
         #    ifgram_list.txt) defines the pairs to process.
@@ -386,8 +413,7 @@ class Engine:
                 if not pairs:
                     raise ValueError(
                         f"engine: no date pairs found in the SLC directory "
-                        f"{self.slc_input} (check slc2ifg.slc_pattern / the "
-                        f"ifgram_list date filters)")
+                        f"{self.slc_input} (check the ifgram_list date filters)")
                 input_root = self.ifgram_dir
                 slc_pairs = True
             else:
@@ -400,7 +426,7 @@ class Engine:
             logger.info("Mid-chain entry (SLC-based complex coherence): "
                         "slc_input=%s, %d pair(s)", self.slc_input, len(pairs))
         else:
-            logger.info("Mid-chain entry: input_dir=%s, input_variant=%s, "
+            logger.info("Mid-chain entry: input_dir=%s, variant=%s, "
                         "%d pair(s)", input_root, variant, len(pairs))
         self._add_uniform_nodes(g, input_root, pair_file, chain,
                                 entry_variant=variant, pairs=pairs)
@@ -422,27 +448,37 @@ class Engine:
         """
         out_dir = self.ifgram_dir
         out_dir.mkdir(parents=True, exist_ok=True)
-        return self._run_ifgram_list(self.slc_input, out_dir)
+        dates: List[str] = []
+        slc_files: Dict[str, Path] = {}
+        if self.slc is not None:
+            for (b, d), p in self.slc.files.items():
+                dates.append(d)
+                slc_files.setdefault(d, p)
+        return self._run_ifgram_list(sorted(set(dates)), out_dir,
+                                     slc_files=slc_files)
 
     def _entry_input_root(self) -> Path:
-        """Input root for mid-chain entry; default = the unified ifgram tree."""
-        raw = self.config.input_dir
-        if raw:
-            p = Path(raw)
-            if not p.is_absolute():
-                p = (self.config.work_dir / p).resolve()
-            return p
+        """Input root for mid-chain entry: the unified ``<work_dir>/ifgrams``."""
         return self.config.ifgram_out_dir
 
-    def _entry_variant(self) -> str:
-        """Input ifg variant for mid-chain entry (default 'fullres')."""
-        from mintpy.stdproc.utils.naming import IFG_VARIANTS
-        v = self.config.input_variant or 'fullres'
-        if v not in IFG_VARIANTS:
-            raise ValueError(
-                f"engine.input_variant '{v}' is invalid, expected one of "
-                f"{IFG_VARIANTS}")
-        return v
+    def _entry_variant(self, input_root: Optional[Path] = None) -> str:
+        """Input ifg variant for mid-chain entry, auto-detected from disk.
+
+        Picks the most-processed variant actually present in the product tree
+        (``filt_mli`` > ``filt`` > ``mli`` > ``fullres``); defaults to
+        ``fullres`` when the tree is empty.
+        """
+        from mintpy.stdproc.utils.naming import int_ext, variant_of
+        root = Path(input_root) if input_root is not None else self.config.ifgram_out_dir
+        ext = int_ext(self.processor)
+        present = set()
+        for dp in naming.glob_date_pair_dirs(root):
+            for p in dp.glob(f'*{ext}'):
+                present.add(variant_of(p, self.processor))
+        for v in ('filt_mli', 'filt', 'mli', 'fullres'):
+            if v in present:
+                return v
+        return 'fullres'
 
     @staticmethod
     def _find_input_pairs(input_root: Path) -> Optional[Path]:
@@ -472,22 +508,8 @@ class Engine:
         return cupy_available()
 
     def _entry_slcs_available(self) -> bool:
-        """True when ``slc_input`` holds SLC files usable by entry-mode
-        complex coherence.
-
-        Uses the *configured* ``slc2ifg.slc_pattern`` (falling back to the
-        processor default) and the same lookup as
-        :func:`generate_ifgram.find_slc_file_by_date` — the top level plus one
-        nested level (e.g. ``<date>/yyyymmdd.slc.tif`` or the OPERA GSLC
-        ``<date>/tXXX_..._yyyymmdd.h5`` layout).
-        """
-        d = Path(self.slc_input)
-        if not d.is_dir():
-            return False
-        from mintpy.stdproc.engine.config import get_opt
-        pattern = (get_opt(self.config.raw, 'slc2ifg.slc_pattern')
-                   or naming.slc_pattern(self.processor))
-        return bool(list(d.glob(pattern)) or list(d.glob(f"*/{pattern}")))
+        """True when the resolved ``slc_input`` holds usable SLC files."""
+        return self.slc is not None and bool(self.slc.files)
 
     def _auto_tile_size(self) -> Optional[int]:
         """Pick a tile size so the dominant per-tile GPU peak fits the budget.
@@ -544,15 +566,20 @@ class Engine:
     def _add_crop_node(self, g: TaskGraph) -> Path:
         """Add the optional crop_slc node; returns the cropped SLC dir.
 
-        When ``slc2ifg.ifgram_list.start_date`` / ``end_date`` /
-        ``exclude_date`` are set, only date-specific files passing the
-        filter are cropped (via ``--file-list``); non-date assets (e.g.
-        ``static_layers_*.h5``) are always kept.
+        Inputs come from the resolved ``slc2ifg.slc_input`` inventory (glob
+        expansion and burst grouping included); the cropped SLCs are written
+        back per burst whenever the input is a multi-burst layout.  When
+        ``slc2ifg.ifgram_list.start_date`` / ``end_date`` / ``exclude_date``
+        are set, only the SLCs passing the filter are cropped.
         """
         cfg = self.config.raw
         from mintpy.stdproc.engine.config import get_opt
         from mintpy.stdproc.ifgram_list import parse_exclude_dates
-        from mintpy.stdproc.utils import naming as _naming
+
+        if self.slc is None:
+            raise ValueError(
+                f"engine: crop_slc needs SLC inputs, but "
+                f"slc2ifg.slc_input={self.slc_input!r} matched no SLC file")
 
         crop_out = get_opt(cfg, 'slc2ifg.crop_slc.output_dir',
                            fallback=str(self.config.work_dir / 'cropped_slc'))
@@ -565,24 +592,20 @@ class Engine:
         exclude_date = get_opt(cfg, 'slc2ifg.ifgram_list.exclude_date')
         ex_dates = parse_exclude_dates(exclude_date)
 
-        inputs = {'slc_dir': self.slc_input}
+        multi = len([b for b in self.slc.bursts if b is not None]) > 1
+        inputs: Dict = {'slc_dir': self.slc.input_dirs()}
         # single-burst input: force flat cropped output (no burst nesting)
-        if len(discover_bursts(self.slc_input)) <= 1:
+        if not multi:
             inputs['no_burst_dirs'] = True
+
         if start_date or end_date or ex_dates:
-            # unified SLC pattern; legacy crop_slc.pattern as fallback
-            pattern = (get_opt(cfg, 'slc2ifg.slc_pattern')
-                       or get_opt(cfg, 'slc2ifg.slc_pattern')
-                       or _naming.slc_pattern(self.processor))
-            candidates = sorted(self.slc_input.glob(f"**/{pattern}"))
             keep = []
             skipped = []
-            for p in candidates:
+            for p in sorted(set(self.slc.files.values())):
                 m = re.search(r'(20\d{6})', p.name)
                 if not m:
-                    # Non-date assets (e.g. static_layers_*.h5 / geometry):
-                    # the date filter only applies to date-specific SLCs,
-                    # so always keep them.
+                    # Non-date assets: the date filter only applies to
+                    # date-specific SLCs, so always keep them.
                     keep.append(str(p))
                     continue
                 d = m.group(1)
@@ -621,12 +644,12 @@ class Engine:
                             label='crop_slc', ctx=ctx))
         return crop_dir
 
-    def _run_ifgram_list(self, slc_dir: Path, out_dir: Path) -> Path:
+    def _run_ifgram_list(self, dates, out_dir: Path,
+                         slc_files: Optional[Dict[str, Path]] = None) -> Path:
         """Eagerly generate the pair list (graph topology depends on it)."""
         from mintpy.stdproc.ifgram_list import (
             filter_date_list,
             generate_pairs,
-            get_date_list,
             write_pair_list,
         )
         cfg = self.config.raw
@@ -653,7 +676,7 @@ class Engine:
                 "ifgram_list mode=file requires slc2ifg.ifgram_list.pair_file "
                 "(a text file with one 'YYYYMMDD-YYYYMMDD' pair per line)")
 
-        all_dates = get_date_list(str(slc_dir))
+        all_dates = [str(d) for d in dates]
         dates = filter_date_list(all_dates, start_date=start_date,
                                  end_date=end_date, exclude_date=exclude_date)
         pair_file = out_dir / 'ifgram_list.txt'
@@ -676,8 +699,10 @@ class Engine:
             # selection guarantees connectivity, hence full SBAS rank.
             from mintpy.stdproc.select_ifgrams import select_pairs
             params = self._select_params(cfg)
-            params['slc_dir'] = str(slc_dir)
             params['processor'] = self.processor
+            if slc_files:
+                params['slc_files'] = {d: p for d, p in slc_files.items()
+                                       if p is not None}
             pairs, report = select_pairs(dates, params=params)
             logger.info(
                 "ifgram_list (select): %d dates -> %d candidate(s) -> %d "
@@ -708,7 +733,6 @@ class Engine:
             get_float_opt,
             get_int_opt,
             get_opt,
-            has_real_value,
         )
 
         p: dict = {}
@@ -727,16 +751,6 @@ class Engine:
                 ('temp_baseline_max', 'int'),
                 ('perp_baseline_max', 'float'),
                 ('perp_baseline_file', 'str'),
-                ('weight_source', 'str'),
-                ('slc_pattern', 'str'),
-                ('model_tau_days', 'float'),
-                ('model_gamma0', 'float'),
-                ('coh_dir', 'str'),
-                ('coh_kind', 'str'),
-                ('coh_variant', 'str'),
-                ('coh_stat', 'str'),
-                ('coh_usable_threshold', 'float'),
-                ('quick_window', 'int'),
                 ('quick_nlks', 'int'),
                 ('quick_max_pixels', 'int'),
                 ('quick_grid', 'int'),
@@ -747,31 +761,26 @@ class Engine:
                 ('quick_usable_threshold', 'float'),
                 ('min_degree', 'int'),
                 ('max_pairs', 'int'),
-                ('quality_threshold', 'float'),
                 ('robust', 'bool'),
                 ('verify', 'bool'),
         ]:
-            if name == 'slc_pattern':
-                # unified pipeline key; legacy select.slc_pattern as fallback
-                key = ('slc2ifg.slc_pattern'
-                       if has_real_value(cfg, 'slc2ifg.slc_pattern')
-                       else 'slc2ifg.slc_pattern')
-            else:
-                key = f'slc2ifg.ifgram_list.select.{name}'
+            key = f'slc2ifg.ifgram_list.select.{name}'
             val = readers[kind](cfg, key, fallback=None)
             if val is not None:
                 p[name] = val
+        # Coherence source: the coherence rasters produced under
+        # <work_dir>/ifgrams are discovered automatically; the caller injects
+        # 'slc_files' for the on-the-fly fallback.
+        p['coh_root'] = str(self.ifgram_dir)
+        p['slc_pattern'] = self.slc.pattern if self.slc else None
         # AOI: the unified pipeline bbox is not a select.* key, but the quick
         # coherence uses it to read ONLY the AOI window of each SLC (the AOI
         # is already cropped) instead of the whole scene.
-        wsen = (get_opt(cfg, 'slc2ifg.bbox', fallback=None)
-                or get_opt(cfg, 'slc2ifg.bbox', fallback=None))
+        wsen = get_opt(cfg, 'slc2ifg.bbox', fallback=None)
         if wsen:
             p['bbox'] = wsen
             p['bbox_buffer'] = get_float_opt(
-                cfg, 'slc2ifg.bbox_buffer',
-                fallback=get_float_opt(cfg, 'slc2ifg.bbox_buffer',
-                                       fallback=0.0)) or 0.0
+                cfg, 'slc2ifg.bbox_buffer', fallback=0.0) or 0.0
         # config keys select.report / select.dot (param names report_file/dot_file)
         rpt = get_opt(cfg, 'slc2ifg.ifgram_list.select.report', fallback=None)
         if rpt:
@@ -804,7 +813,7 @@ class Engine:
         return pairs
 
     def _make_generate_ifgram_node(self, key: str, burst: Optional[str],
-                                   slc_dir: Path, out_dir: Path,
+                                   slc_dirs: List[Path], out_dir: Path,
                                    d1: str, d2: str, pair_file: Path,
                                    read_crop: bool = True) -> TaskNode:
         """Build the per-pair generate_ifgram node.
@@ -825,7 +834,7 @@ class Engine:
             tool_name=tool.name,
             inputs={
                 'pairs_file': pair_file,
-                'slc_dir': slc_dir,
+                'slc_dir': slc_dirs,
                 'date1': d1,
                 'date2': d2,
                 'burst': burst,
@@ -837,7 +846,7 @@ class Engine:
         return TaskNode(key=key, tool=tool, label=f"generate_ifgram {d1}_{d2}", ctx=ctx)
 
     def _make_complex_coh_node(self, key: str, burst: Optional[str],
-                               slc_dir: Path, out_dir: Path,
+                               slc_dirs: List[Path], out_dir: Path,
                                d1: str, d2: str, pair_file: Path,
                                read_crop: bool = True) -> TaskNode:
         """Build the per-pair complex-coherence node.
@@ -856,7 +865,7 @@ class Engine:
             tool_name=tool.name,
             inputs={
                 'pairs_file': pair_file,
-                'slc_dir': slc_dir,
+                'slc_dir': slc_dirs,
                 'date1': d1,
                 'date2': d2,
                 'burst': burst,
@@ -953,16 +962,6 @@ class Engine:
         #: unwrap coherence type: auto | complex | phsig | none
         unwrap_coh_cfg = get_opt(self.config.raw, 'slc2ifg.unwrap.coh_type',
                                  fallback='auto')
-        #: External coherence input for SNAPHU weighting: reuse coherence
-        #: rasters produced elsewhere (e.g. ISCE2 or a different filter /
-        #: multilook) by pointing slc2ifg.coh_dir (+ coh_pattern) at
-        #: them.  Lookup order per pair {d1}_{d2}:
-        #:   coh_dir/{d1}_{d2}/{coh_pattern}   (engine product-tree layout)
-        #:   coh_dir/{coh_pattern}             (flat fallback)
-        coh_dir_cfg = get_opt(self.config.raw, 'slc2ifg.coh_dir',
-                              fallback=None)
-        coh_pat_cfg = get_opt(self.config.raw, 'slc2ifg.coh_pattern',
-                              fallback='*.tif')
 
         for d1, d2 in pairs:
             dp = f"{d1}_{d2}"
@@ -1016,7 +1015,7 @@ class Engine:
                     ctx = ToolContext(
                         tool_name='complex_coh',
                         inputs={'pairs_file': None,
-                                'slc_dir': self.slc_input,
+                                'slc_dir': self.slc.input_dirs() if self.slc else [],
                                 'date1': d1, 'date2': d2,
                                 'burst': None},
                         outputs={'coh': cout},
@@ -1101,11 +1100,17 @@ class Engine:
                     # forcing regeneration.  'none' (or 'auto' with no
                     # coherence available) runs SNAPHU with weight 1 (uniform).
                     coh_cfg = str(unwrap_coh_cfg or 'auto').lower()
-                    # expected on-disk rasters (used as the fallback below)
-                    phsig_existing = naming.coh_path(
-                        cur_base, d1, d2, cur_variant, 'phsig', self.processor)
-                    cpx_existing = naming.coh_path(
-                        self.ifgram_dir, d1, d2, 'fullres', 'cpx', self.processor)
+                    # Coherence rasters are auto-discovered under
+                    # <work_dir>/ifgrams: kind/variant are inferred from the
+                    # filename (see utils.coherence).
+                    phsig_found = find_coh_raster(
+                        self.ifgram_dir, d1, d2,
+                        prefer_variant=cur_variant, prefer_kind='phsig',
+                        require_kind=True)
+                    cpx_found = find_coh_raster(
+                        self.ifgram_dir, d1, d2,
+                        prefer_variant='fullres', prefer_kind='cpx',
+                        require_kind=True)
                     if coh_cfg in ('phsig', 'complex', 'none'):
                         coh_type = coh_cfg
                     elif coh_cfg == 'auto':
@@ -1113,9 +1118,9 @@ class Engine:
                             coh_type = 'phsig'
                         elif cpx_path is not None and cur_variant == 'fullres':
                             coh_type = 'complex'
-                        elif cpx_existing.is_file() and cur_variant == 'fullres':
+                        elif cpx_found is not None and cur_variant == 'fullres':
                             coh_type = 'complex'   # reuse an existing complex coh
-                        elif phsig_existing.is_file():
+                        elif phsig_found is not None:
                             coh_type = 'phsig'     # reuse an existing phsig coh
                         else:
                             coh_type = 'none'
@@ -1126,39 +1131,20 @@ class Engine:
 
                     coh_input: Optional[Path] = None
                     coh_node: Optional[str] = None
-                    # External coherence override: slc2ifg.coh_dir +
-                    # coh_pattern wins over the engine-generated coherence.
-                    if coh_dir_cfg:
-                        ext_dir = Path(coh_dir_cfg)
-                        for cand_dir in (ext_dir / dp, ext_dir):
-                            hits = sorted(cand_dir.glob(coh_pat_cfg))
-                            if hits:
-                                coh_input = Path(hits[0])
-                                coh_type = 'external'
-                                logger.info(
-                                    "unwrap: using external coherence file "
-                                    "%s (slc2ifg.coh_dir / "
-                                    "coh_pattern, dp=%s)", coh_input, dp)
-                                break
-                        if coh_input is None:
-                            logger.warning(
-                                "unwrap: no external coherence file matching "
-                                "'%s' under %s or %s (dp=%s); falling back to "
-                                "coh_type='%s'", coh_pat_cfg, ext_dir / dp,
-                                ext_dir, dp, coh_type)
-                    if coh_input is None and coh_type == 'phsig':
+                    if coh_type == 'phsig':
                         if ph_out is not None:
                             coh_input, coh_node = ph_out[0], ph_out[1]
-                        elif phsig_existing.is_file():
+                        elif phsig_found is not None:
                             # mid-chain entry: reuse a pre-generated phsig raster
-                            coh_input, coh_node = phsig_existing, None
+                            coh_input, coh_node = phsig_found, None
                         else:
                             raise ValueError(
                                 f"unwrap: coh_type='phsig' but the "
                                 f"'phsig_coh' stage is missing from "
                                 f"engine.stages/tools (dp={dp}) and no "
-                                f"existing raster at {phsig_existing}")
-                    elif coh_input is None and coh_type == 'complex':
+                                f"coherence raster exists under "
+                                f"{self.ifgram_dir / dp}")
+                    elif coh_type == 'complex':
                         if cur_variant != 'fullres':
                             raise ValueError(
                                 f"unwrap: complex coherence is fullres-only "
@@ -1167,15 +1153,16 @@ class Engine:
                                 f"coh_type='phsig' or run fullres")
                         if cpx_path is not None:
                             coh_input, coh_node = cpx_path, cpx_node
-                        elif cpx_existing.is_file():
+                        elif cpx_found is not None:
                             # mid-chain entry: reuse a pre-generated complex coh
-                            coh_input, coh_node = cpx_existing, None
+                            coh_input, coh_node = cpx_found, None
                         else:
                             raise ValueError(
                                 f"unwrap: coh_type='complex' but the "
                                 f"'complex_coh' stage is missing from "
                                 f"engine.stages/tools (dp={dp}) and no "
-                                f"existing raster at {cpx_existing}")
+                                f"coherence raster exists under "
+                                f"{self.ifgram_dir / dp}")
                     # 'none' -> coh_input stays None (SNAPHU weight = 1)
 
                     # Inject the *resolved* coherence type so the tool log
@@ -1306,7 +1293,7 @@ class Engine:
             base['ps_nlks'] = self._ps_nlks()
         if tool == 'unwrap':
             # waterMaskFile from MintPy's load section doubles as the SNAPHU
-            # mask when slc2ifg.mask is not set (the .wbd
+            # mask when slc2ifg.unwrap.mask_file is not set (the .wbd
             # water mask is auto-converted to the ifg grid by _unwrap_single).
             if 'mask_file' not in base or not base['mask_file']:
                 wm = get_opt(cfg, 'mintpy.load.waterMaskFile')
@@ -1465,7 +1452,6 @@ class Engine:
         to_delete = plan_cleanup(
             self._manifest,
             keep_policy=policy,
-            keep_variants=self.config.keep_variants,
         )
         if not to_delete:
             logger.info("No intermediate files to delete")

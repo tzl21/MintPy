@@ -25,11 +25,9 @@ from mintpy.stdproc.engine.tool import (
 )
 
 #: complex_coh / phsig_coh share the slc2ifg.generate_coh.* config section
+#: (the HDF5 subdataset is auto-detected; the SLC pattern is inferred from
+#: slc2ifg.slc_input).
 _GENERATE_COH_PARAMS = [
-    ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.slc_pattern'),
-    ParamSpec('subdataset', cfg='slc2ifg.subdataset',
-              default='/data/VV'),
     ParamSpec('window_size', cfg='slc2ifg.generate_coh.cc_window_size',
               kind='int', default=5),
     #: window weighting: 'triangular' (ISCE2 Bartlett, default) | 'uniform'
@@ -80,25 +78,30 @@ class ComplexCohTool(Tool):
         from mintpy.stdproc.generate_coh import (
             find_slc_file_by_date,
         )
-        from mintpy.stdproc.utils import naming
+        from mintpy.stdproc.utils.slc_input import (infer_slc_pattern,
+                                                    _walk_slc_files)
 
         processor = ctx.param('processor')
-        slc_pattern = ctx.param('slc_pattern', naming.slc_pattern(processor))
-        slc_dir = Path(ctx.input('slc_dir'))
+        raw_dirs = ctx.input('slc_dir')
+        slc_dirs = [Path(d) for d in (raw_dirs if isinstance(raw_dirs, (list, tuple))
+                                      else [raw_dirs])]
+        names = [f.name for d in slc_dirs for f in _walk_slc_files(Path(d))]
+        slc_pattern = infer_slc_pattern(names) if names else (
+            '*.slc' if processor == 'isce2' else '*.slc.*')
         d1, d2 = str(ctx.input('date1')), str(ctx.input('date2'))
 
-        slc1 = find_slc_file_by_date([slc_dir], d1, slc_pattern)
-        slc2 = find_slc_file_by_date([slc_dir], d2, slc_pattern)
+        slc1 = find_slc_file_by_date(slc_dirs, d1, slc_pattern)
+        slc2 = find_slc_file_by_date(slc_dirs, d2, slc_pattern)
         if slc1 is None:
-            raise FileNotFoundError(f"SLC for date {d1} not found in {slc_dir}")
+            raise FileNotFoundError(f"SLC for date {d1} not found in {slc_dirs}")
         if slc2 is None:
-            raise FileNotFoundError(f"SLC for date {d2} not found in {slc_dir}")
+            raise FileNotFoundError(f"SLC for date {d2} not found in {slc_dirs}")
 
         use_gpu = bool(ctx.param('use_gpu', False)) and cupy_available()
         tile_size = int(ctx.param('tile_size', 0) or 0)
         window = int(ctx.param('window_size', 5))
         window_type = ctx.param('window_type', 'triangular')
-        sub = ctx.param('subdataset', '/data/VV')
+        sub = None  # subdataset auto-detected from the HDF5 file
         out = ctx.output('coh')
         out.parent.mkdir(parents=True, exist_ok=True)
 

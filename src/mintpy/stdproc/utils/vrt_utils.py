@@ -37,9 +37,20 @@ _VRT_TEMPLATE = """\
 
 
 def _format_nc_filename(filepath: Union[str, Path], subdataset: Optional[str] = None):
-    """Format a filepath for GDAL, handling HDF5/NetCDF subdatasets."""
-    if subdataset and _is_hdf5(str(filepath)):
-        return f'HDF5:"{filepath}":{subdataset}'
+    """Format a filepath for GDAL, handling HDF5/NetCDF subdatasets.
+
+    When ``subdataset`` is not given, the polarization subdataset of an HDF5
+    SLC is auto-detected (preferring VV).
+    """
+    if _is_hdf5(str(filepath)):
+        if not subdataset:
+            try:
+                from mintpy.stdproc.io import detect_hdf5_subdataset
+                subdataset = detect_hdf5_subdataset(filepath)
+            except Exception:
+                subdataset = None
+        if subdataset:
+            return f'HDF5:"{filepath}":{subdataset}'
     return str(filepath)
 
 

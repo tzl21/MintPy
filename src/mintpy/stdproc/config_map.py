@@ -2,13 +2,15 @@
 """Canonical slc2ifg configuration keys and their legacy aliases.
 
 Functional duplicates used to live under several per-tool namespaces
-(``crop_slc.wsen`` vs ``bbox``, ``generate_coh.ps_nlks`` vs
-``unwrap.snaphu.nlooks``, ``generate_ifgram.subdataset`` vs
-``generate_coh.subdataset``, ...).  The canonical key is now the SINGLE
-top-level ``slc2ifg.<name>`` (e.g. ``slc2ifg.bbox``, ``slc2ifg.mask``); the old
-keys keep working for one deprecation cycle through
-:func:`normalize_config`, which is applied once at every entry point that reads
-a raw config dict.
+(``crop_slc.wsen`` vs ``bbox``, ``generate_coh.ps_nlks`` vs ``nlooks``, ...).
+The canonical key is the SINGLE top-level ``slc2ifg.<name>`` (e.g.
+``slc2ifg.bbox``, ``slc2ifg.unwrap.mask_file``); the old keys keep working for
+one deprecation cycle through :func:`normalize_config`, which is applied once at
+every entry point that reads a raw config dict.
+
+Keys that were removed outright (their feature is now automatic) are listed in
+:data:`REMOVED_KEYS`: they are warned about and dropped, so old configs keep
+loading instead of failing.
 """
 
 import logging
@@ -21,44 +23,79 @@ LEGACY_ALIASES = {
     # AOI
     'slc2ifg.crop_slc.wsen': 'slc2ifg.bbox',
     'slc2ifg.crop_slc.buffer': 'slc2ifg.bbox_buffer',
-    # SLC discovery
-    'slc2ifg.crop_slc.pattern': 'slc2ifg.slc_pattern',
-    'slc2ifg.generate_ifgram.slc_pattern': 'slc2ifg.slc_pattern',
-    'slc2ifg.generate_coh.slc_pattern': 'slc2ifg.slc_pattern',
-    'slc2ifg.ifgram_list.select.slc_pattern': 'slc2ifg.slc_pattern',
-    # HDF5 / geometry
-    'slc2ifg.generate_ifgram.subdataset': 'slc2ifg.subdataset',
-    'slc2ifg.generate_coh.subdataset': 'slc2ifg.subdataset',
-    'slc2ifg.crop_slc.geom_dir': 'slc2ifg.geom_dir',
-    'slc2ifg.multilook.geom_dir': 'slc2ifg.geom_dir',
     # looks
     'slc2ifg.unwrap.nlooks': 'slc2ifg.nlooks',
     'slc2ifg.unwrap.snaphu.nlooks': 'slc2ifg.nlooks',
     'slc2ifg.generate_coh.ps_nlks': 'slc2ifg.nlooks',
-    # mask
-    'slc2ifg.unwrap.mask_file': 'slc2ifg.mask',
-    'slc2ifg.unwrap.snaphu.mask_file': 'slc2ifg.mask',
-    # coherence input (shared by network selection and unwrap weighting)
-    'slc2ifg.unwrap.coh_dir': 'slc2ifg.coh_dir',
-    'slc2ifg.unwrap.coh_pattern': 'slc2ifg.coh_pattern',
-    'slc2ifg.ifgram_list.select.coh_dir': 'slc2ifg.coh_dir',
-    'slc2ifg.ifgram_list.select.coh_kind': 'slc2ifg.coh_kind',
-    'slc2ifg.ifgram_list.select.coh_variant': 'slc2ifg.coh_variant',
-    'slc2ifg.ifgram_list.select.coh_stat': 'slc2ifg.coh_stat',
-    'slc2ifg.ifgram_list.select.coh_usable_threshold': 'slc2ifg.coh_usable_threshold',
+    # unwrap mask (nonzero = valid/unwrappable, 0 = excluded)
+    'slc2ifg.mask': 'slc2ifg.unwrap.mask_file',
+    'slc2ifg.unwrap.snaphu.mask_file': 'slc2ifg.unwrap.mask_file',
     # no-skip-existing is an engine-wide knob
     'slc2ifg.crop_slc.no_skip_existing': 'engine.no_skip_existing',
     # executor selector
     'mintpy.slc2ifg.engine': 'slc2ifg.engine',
 }
 
-#: keys that are accepted but no longer have any effect
+#: keys that are accepted but no longer have any effect.  Every key whose
+#: feature became automatic (slc pattern inference, HDF5 subdataset detection,
+#: coherence auto-discovery, fixed product paths) is listed here so existing
+#: configurations keep loading with a deprecation warning.
 REMOVED_KEYS = {
     'mintpy.slc2ifg.skip',
     'slc2ifg.ifgram_list.oneyear_interferograms',
     'slc2ifg.generate_coh.skip_phase_sigma',
     'slc2ifg.generate_coh.skip_complex_coherence',
-    'slc2ifg.ifgram_list.select.quick_max_workers',
+    # SLC discovery: the pattern is inferred from slc2ifg.slc_input
+    'slc2ifg.slc_pattern',
+    'slc2ifg.crop_slc.pattern',
+    'slc2ifg.generate_ifgram.slc_pattern',
+    'slc2ifg.generate_coh.slc_pattern',
+    'slc2ifg.ifgram_list.select.slc_pattern',
+    # HDF5 subdataset is auto-detected (/data/[VV,VH,HH], preferring VV)
+    'slc2ifg.subdataset',
+    'slc2ifg.generate_ifgram.subdataset',
+    'slc2ifg.generate_coh.subdataset',
+    # product patterns: all slc2ifg products are .tif
+    'slc2ifg.ifg_pattern',
+    'slc2ifg.cor_pattern',
+    'slc2ifg.unw_pattern',
+    # coherence rasters are auto-discovered under <work_dir>/ifgrams/*
+    'slc2ifg.coh_dir',
+    'slc2ifg.coh_pattern',
+    'slc2ifg.coh_kind',
+    'slc2ifg.coh_variant',
+    'slc2ifg.coh_stat',
+    'slc2ifg.coh_usable_threshold',
+    'slc2ifg.unwrap.coh_dir',
+    'slc2ifg.unwrap.coh_pattern',
+    'slc2ifg.ifgram_list.select.coh_dir',
+    'slc2ifg.ifgram_list.select.coh_kind',
+    'slc2ifg.ifgram_list.select.coh_variant',
+    'slc2ifg.ifgram_list.select.coh_stat',
+    'slc2ifg.ifgram_list.select.coh_usable_threshold',
+    # geometry is no longer cropped/multilooked by the pipeline; load_data
+    # downsamples a full-resolution geometry file to the interferogram size
+    'slc2ifg.geom_dir',
+    'slc2ifg.crop_slc.geom_dir',
+    'slc2ifg.multilook.geom_dir',
+    'slc2ifg.crop_slc.prefix',
+    'slc2ifg.crop_slc.by_burst',
+    # product paths / verification are fixed
+    'slc2ifg.generate_ifgram.output_dir',
+    'slc2ifg.generate_ifgram.no_verify',
+    # selection: fixed window, measured-coherence-only weights, no floor
+    'slc2ifg.ifgram_list.select.quick_window',
+    'slc2ifg.ifgram_list.select.weight_source',
+    'slc2ifg.ifgram_list.select.model_tau_days',
+    'slc2ifg.ifgram_list.select.model_gamma0',
+    'slc2ifg.ifgram_list.select.quality_threshold',
+    # engine mid-chain entry reads <work_dir>/ifgrams automatically
+    'engine.input_dir',
+    'engine.input_variant',
+    'engine.keep_variants',
+    # stitch file types are detected under <work_dir>/ifgrams; bounds follow bbox
+    'slc2ifg.stitch.file_types',
+    'slc2ifg.stitch.out_bounds',
 }
 
 

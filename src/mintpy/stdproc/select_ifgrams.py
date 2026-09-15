@@ -48,9 +48,9 @@ Algorithm (``select_ifgrams``)
    all pairs within a temporal-baseline cap, optionally filtered by
    perpendicular baseline.  This covers both "sparse k-NN + annual pairs"
    and "fully connected within a window" flavours.
-2. Weight every candidate (``temporal_model_weights``,
-   ``weights_from_coherence_rasters``, ``quick_coherence_weights`` or a
-   mixture).
+2. Weight every candidate with measured coherence
+   (``weights_from_coherence_rasters`` for existing rasters under
+   ``<work_dir>/ifgrams``, else ``quick_coherence_weights`` on the SLCs).
 3. ``select_ifgrams`` —
    a. maximum spanning tree (Kruskal, highest weight first) — guarantees
       connectivity with exactly ``N-1`` edges;
@@ -94,17 +94,10 @@ DEFAULT_PARAMS: Dict[str, object] = {
     'temp_baseline_max': None,       # also include ALL pairs within this many days
     'perp_baseline_max': None,       # metres; requires perp_baselines
     'perp_baseline_file': None,      # two-column 'date bperp' text file
-    # weight source: model | coherence | mixed
-    'weight_source': 'model',
-    # model weights
-    'model_tau_days': 90.0,          # temporal decorrelation time constant
-    'model_gamma0': 1.0,             # coherence at zero temporal baseline
-    # measured weights from existing coherence rasters
-    'coh_dir': None,
-    'coh_kind': 'phsig',             # phsig | cpx
-    'coh_variant': 'filt_mli',       # fullres | mli | filt | filt_mli
-    'coh_stat': 'mean',              # mean | median | usable_frac | fisher
-    'coh_usable_threshold': 0.3,     # for stat='usable_frac'
+    # measured weights: existing coherence rasters are auto-discovered under
+    # coh_root (<work_dir>/ifgrams); when none exist the on-the-fly quick
+    # coherence on the SLCs is used instead.
+    'coh_root': None,                # root of the {d1}_{d2}/*.coh.tif tree
     # measured weights from on-the-fly complex coherence on SLCs
     # With bbox (+ bbox_buffer): read ONLY that window of each SLC and
     # block-average it by quick_nlks (no whole-image read); the AOI is
@@ -113,7 +106,6 @@ DEFAULT_PARAMS: Dict[str, object] = {
     # over the whole scene (no whole-image read either).
     'bbox': None,                    # WSEN (W S E N) AOI for quick coherence
     'bbox_buffer': 0.0,              # extra margin around bbox, degrees
-    'quick_window': 5,               # coherence estimation window
     'quick_nlks': 1,                 # block-mean downsampling of the bbox window
     'quick_max_pixels': 1_048_576,   # cap on the bbox window size
     'quick_grid': 12,                # sampling grid per side (no-bbox path)
@@ -125,17 +117,20 @@ DEFAULT_PARAMS: Dict[str, object] = {
     # selection
     'min_degree': 2,                 # minimum interferograms per date
     'max_pairs': None,               # global edge budget (None = no cap)
-    'quality_threshold': 0.0,        # augmentation floor on the weight
     'robust': False,                 # repair bridges -> 2-edge robustness
     'verify': True,                  # rank/connectivity verification
     'reference': None,               # reference date (None = earliest)
     # output / plumbing (set by the caller)
     'slc_dir': None,
+    'slc_files': None,               # {date: Path} resolved from slc2ifg.slc_input
     'processor': 'isce3',
     'slc_pattern': None,
     'report_file': None,             # write a JSON report here when set
     'dot_file': None,                # write the network as GraphViz DOT here
 }
+
+#: On-the-fly coherence boxcar window (pixels).  Fixed; not configurable.
+QUICK_WINDOW = 8
 
 #: Parameter names read by the engine / tool layer (order = doc order)
 SELECT_PARAM_KEYS: Tuple[str, ...] = tuple(DEFAULT_PARAMS)
@@ -520,33 +515,6 @@ def _repair_bridges(
 # ------------------------------------------------------------------------
 # Quality weights
 # ------------------------------------------------------------------------
-def temporal_model_weights(
-    dates: Sequence[str],
-    pairs: Iterable[Tuple[str, str]],
-    tau_days: float = 90.0,
-    gamma0: float = 1.0,
-    perp_baselines: Optional[Dict[str, float]] = None,
-    perp_baseline_max: Optional[float] = None,
-) -> Dict[Tuple[str, str], float]:
-    """Model-based quality ``w_ij = gamma0 * exp(-dt/tau)``.
-
-    Optionally multiplied by a perpendicular-baseline factor
-    ``max(0, 1 - |dB|/B_max)``.  Used as a cold start when no coherence
-    data is available; values are clipped to ``[0, 1]``.
-    """
-    dts = {d: datetime.strptime(d, DATE_FMT) for d in dates}
-    tau = float(tau_days)
-    out: Dict[Tuple[str, str], float] = {}
-    for a, b in pairs:
-        dt = (dts[b] - dts[a]).days
-        w = float(gamma0) * math.exp(-dt / tau)
-        if perp_baselines is not None and perp_baseline_max:
-            dB = abs(perp_baselines.get(a, 0.0) - perp_baselines.get(b, 0.0))
-            w *= max(0.0, 1.0 - dB / float(perp_baseline_max))
-        out[(a, b)] = float(np.clip(w, 0.0, 1.0))
-    return out
-
-
 def aggregate_coherence(
     values: np.ndarray,
     stat: str = 'mean',
@@ -562,7 +530,7 @@ def aggregate_coherence(
       ``>= usable_threshold`` (correlates with the unwrappable area)
     * ``fisher``      — mean Fisher information ``gamma^2/(1-gamma^2)``
       (the natural information weight of an interferogram; unbounded
-      range ``>= 0``, so ``quality_threshold`` is in these units too)
+      range ``>= 0``)
     """
     v = np.asarray(values, dtype=np.float64).ravel()
     v = v[v > 0]
@@ -614,32 +582,31 @@ def _read_sampled_raster(band, grid: int = 12, block: int = 16) -> np.ndarray:
 
 def weights_from_coherence_rasters(
     pairs: Iterable[Tuple[str, str]],
-    coh_dir: str,
-    kind: str = 'phsig',
-    variant: str = 'filt_mli',
+    coh_root: str,
     processor: str = 'isce3',
     stat: str = 'mean',
     usable_threshold: float = 0.3,
     grid: int = 12,
     block: int = 16,
 ) -> Dict[Tuple[str, str], Optional[float]]:
-    """Pair quality from existing coherence rasters.
+    """Pair quality from coherence rasters under ``coh_root``.
 
-    Looks up ``coh_dir/{date1}_{date2}/{variant}_{kind}.coh[.tif]`` (see
-    ``mintpy.stdproc.utils.naming.coh_path``).  Missing rasters yield
-    ``None`` (the caller decides: model fallback or weight 0).
+    Each pair's raster is auto-discovered as
+    ``coh_root/{date1}_{date2}/{variant}.{kind}.coh[.tif]``; kind and variant
+    are inferred from the filename (preferring phsig, then the most-processed
+    variant).  Missing rasters yield ``None`` (weight 0 downstream).
     """
     from osgeo import gdal  # lazy
 
-    from .utils.naming import coh_path
+    from .utils.coherence import find_coh_raster
 
     gdal.UseExceptions()
     out: Dict[Tuple[str, str], Optional[float]] = {}
     for a, b in pairs:
-        p = coh_path(coh_dir, a, b, variant=variant, kind=kind,
-                     processor=processor)
-        if not p.exists():
-            logger.warning("coherence raster missing for %s_%s: %s", a, b, p)
+        p = find_coh_raster(coh_root, a, b)
+        if p is None:
+            logger.warning("coherence raster missing for %s_%s under %s",
+                           a, b, coh_root)
             out[(a, b)] = None
             continue
         try:
@@ -684,6 +651,9 @@ def _read_sampled_slc(
 
     gdal.UseExceptions()
     p = str(path)
+    if p.lower().endswith(('.h5', '.hdf5')):
+        from . import io as sio
+        subdataset = sio.detect_hdf5_subdataset(p, subdataset)
     if subdataset and p.lower().endswith(('.h5', '.hdf5')):
         ds = gdal.Open(f'NETCDF:"{p}":"//{str(subdataset).lstrip("/")}"')
     else:
@@ -748,6 +718,9 @@ def _read_windowed_slc(
 
     gdal.UseExceptions()
     p = str(path)
+    if p.lower().endswith(('.h5', '.hdf5')):
+        from . import io as sio
+        subdataset = sio.detect_hdf5_subdataset(p, subdataset)
     if subdataset and p.lower().endswith(('.h5', '.hdf5')):
         ds = gdal.Open(f'NETCDF:"{p}":"//{str(subdataset).lstrip("/")}"')
     else:
@@ -813,11 +786,12 @@ def _debias_coherence(coh: np.ndarray, looks: int) -> np.ndarray:
 def quick_coherence_weights(
     dates: Sequence[str],
     pairs: Iterable[Tuple[str, str]],
-    slc_dir: str,
+    slc_dir: Optional[str] = None,
     processor: str = 'isce3',
     slc_pattern: Optional[str] = None,
+    slc_files: Optional[Dict[str, object]] = None,
     nlks: int = 1,
-    window: int = 5,
+    window: int = QUICK_WINDOW,
     max_pixels: int = 1_048_576,
     grid: int = 12,
     block: int = 16,
@@ -826,7 +800,7 @@ def quick_coherence_weights(
     debias: bool = True,
     stat: str = 'mean',
     usable_threshold: float = 0.3,
-    subdataset: str = '/data/VV',
+    subdataset: Optional[str] = None,
     max_workers: int = 1,
 ) -> Dict[Tuple[str, str], Optional[float]]:
     """Pair quality from complex coherence on SLCs.
@@ -859,16 +833,21 @@ def quick_coherence_weights(
 
     gdal.UseExceptions()
     pattern = slc_pattern or default_pattern(processor)
-    slc_dirs = [Path(slc_dir)]
-    first = next(
-        (d for d in dates
-         if find_slc_file_by_date(slc_dirs, d, pattern) is not None), None)
+
+    def _find(date: str):
+        if slc_files:
+            return slc_files.get(date)
+        if not slc_dir:
+            return None
+        return find_slc_file_by_date([Path(slc_dir)], date, pattern)
+
+    first = next((d for d in dates if _find(d) is not None), None)
     if first is None:
         logger.warning(
-            "quick coherence: no SLC found under %s with pattern '%s' — "
-            "check slc2ifg.slc_input / slc2ifg.slc_pattern", slc_dir, pattern)
+            "quick coherence: no SLC found for any date — check "
+            "slc2ifg.slc_input (path or glob)")
         return {(a, b): None for a, b in pairs}
-    f0 = find_slc_file_by_date(slc_dirs, first, pattern)
+    f0 = _find(first)
 
     bbox = _as_bbox(bbox)
     use_bbox = bbox is not None
@@ -908,7 +887,7 @@ def quick_coherence_weights(
     cache: Dict[str, Optional[np.ndarray]] = {}
     looks_of: Dict[str, int] = {}
     for d in sorted({x for p in pairs for x in p}):
-        f = find_slc_file_by_date(slc_dirs, d, pattern)
+        f = _find(d)
         if f is None:
             cache[d] = None
             continue
@@ -975,7 +954,6 @@ def _max_mean_augment(
     weights: Dict[Tuple[str, str], float],
     min_degree: int,
     max_pairs: Optional[int],
-    thresh: float,
 ) -> Tuple[Set[Tuple[str, str]], Dict[str, int]]:
     """Augment the tree to a min-degree, mean-maximising network.
 
@@ -984,8 +962,8 @@ def _max_mean_augment(
     1. **Phase B1 — satisfy ``min_degree`` first** (a hard guarantee): edges
        are added in descending weight whenever an endpoint still has degree
        ``< min_degree``, until every date reaches the target (or the budget /
-       the above-threshold candidates run out).  This guarantees the degree
-       lower bound is met before anything else.
+       the candidates run out).  This guarantees the degree lower bound is met
+       before anything else.
     2. **Phase B2 — maximise the mean with the remaining budget**: with any
        budget left over, add edges at or above the running mean (they can
        never lower the average), repeating to a fixed point.
@@ -1012,8 +990,6 @@ def _max_mean_augment(
                     break
                 if (a, b) in selected:
                     continue
-                if weights[(a, b)] < thresh:
-                    continue
                 da = degree[a] < min_degree
                 db = degree[b] < min_degree
                 if not (da or db):
@@ -1036,8 +1012,6 @@ def _max_mean_augment(
                 break
             if (a, b) in selected:
                 continue
-            if weights[(a, b)] < thresh:
-                continue
             if weights[(a, b)] < mu:
                 continue            # below the running mean -> would lower the average
             selected.add((a, b))
@@ -1055,7 +1029,6 @@ def select_ifgrams(
     weights: Dict[Tuple[str, str], float],
     min_degree: int = 2,
     max_pairs: Optional[int] = None,
-    quality_threshold: float = 0.0,
     robust: bool = False,
 ) -> Tuple[List[Tuple[str, str]], Dict[str, object]]:
     """Select a connected, coherence-prioritised interferogram network.
@@ -1083,9 +1056,6 @@ def select_ifgrams(
     weights : ``{(d1, d2): quality}``; missing weights are treated as 0.
     min_degree : minimum interferograms per date (1 = pure spanning tree).
     max_pairs : global edge budget; ``None`` = unbounded.
-    quality_threshold : augmentation floor on the weight (the spanning tree
-        may still use below-threshold edges — connectivity is a hard
-        guarantee, a warning is logged).
     robust : repair bridges with the highest-weight crossing candidate
         (2-edge robustness where the candidate set allows).
 
@@ -1135,7 +1105,6 @@ def select_ifgrams(
 
     min_degree = max(0, int(min_degree))
     max_pairs = int(max_pairs) if max_pairs else None
-    thresh = float(quality_threshold) if quality_threshold is not None else 0.0
 
     # --- Phase 2a: max-mean augmentation (degree >= min_degree) -----------
     # Objective: maximise the *average* (mean) coherence of the selected
@@ -1147,12 +1116,12 @@ def select_ifgrams(
     # lower bound — see _max_mean_augment.
     if min_degree > 1:
         selected, degree = _max_mean_augment(
-            dates, selected, degree, order, w, min_degree, max_pairs, thresh)
+            dates, selected, degree, order, w, min_degree, max_pairs)
         unmet = [d for d in dates if degree[d] < min_degree]
         if unmet:
             logger.warning(
                 "min_degree=%d not fully met for %d date(s): %s "
-                "(candidate set too sparse or below quality_threshold)",
+                "(candidate set too sparse)",
                 min_degree, len(unmet), ', '.join(unmet[:8]))
 
     # --- Phase 2b: fill the remaining budget with the best edges ----------
@@ -1162,8 +1131,6 @@ def select_ifgrams(
             if budget <= 0:
                 break
             if p in selected:
-                continue
-            if w[p] < thresh:
                 continue
             selected.add(p)
             a, b = p
@@ -1202,7 +1169,6 @@ def select_ifgrams(
         'max_degree_actual': max(degree.values()),
         'degree_unmet': [d for d in dates if degree[d] < min_degree],
         'max_pairs': max_pairs,
-        'quality_threshold': thresh,
         'robust': bool(robust),
     }
     return sorted(selected), report
@@ -1318,85 +1284,59 @@ def select_pairs(
             f"for {len(dates)} dates — need at least {len(dates) - 1}. "
             f"Relax num_connections / annual_windows / temp_baseline_max.")
 
-    # 2. weights
-    source = str(p.get('weight_source') or 'model').lower()
-    if source not in ('model', 'coherence', 'mixed'):
-        raise ValueError(
-            f"weight_source '{source}' invalid, expected model|coherence|mixed")
+    # 2. weights: measured coherence only.  Existing coherence rasters under
+    #    coh_root (<work_dir>/ifgrams) are preferred; when none exist for any
+    #    candidate pair the coherence is measured on the fly from the SLCs.
+    from .utils.coherence import find_coh_raster
 
-    model_w = temporal_model_weights(
-        dates, candidates,
-        tau_days=float(p.get('model_tau_days') or 90.0),
-        gamma0=float(p.get('model_gamma0') or 1.0),
-        perp_baselines=perp_baselines,
-        perp_baseline_max=p.get('perp_baseline_max'),
+    slc_files = p.get('slc_files')
+    coh_root = p.get('coh_root')
+    quick_kwargs = dict(
+        nlks=int(p.get('quick_nlks') or 1),
+        window=QUICK_WINDOW,
+        max_pixels=int(p.get('quick_max_pixels') or 1_048_576),
+        grid=int(p.get('quick_grid') or 12),
+        block=int(p.get('quick_block') or 16),
+        bbox=_as_bbox(p.get('bbox')),
+        bbox_buffer=float(p.get('bbox_buffer') or 0.0),
+        debias=_as_bool(p.get('quick_debias', True), default=True),
+        stat=str(p.get('quick_stat') or 'mean'),
+        usable_threshold=float(p.get('quick_usable_threshold') or 0.3),
+        max_workers=int(p.get('quick_max_workers') or 1),
     )
+    use_rasters = bool(coh_root) and any(
+        find_coh_raster(str(coh_root), a, b) is not None for a, b in candidates)
+    if use_rasters:
+        measured_w = weights_from_coherence_rasters(
+            candidates, coh_root=str(coh_root), processor=processor,
+            stat=quick_kwargs['stat'],
+            usable_threshold=quick_kwargs['usable_threshold'],
+            grid=quick_kwargs['grid'], block=quick_kwargs['block'])
+        weight_source_used = 'coherence_rasters'
+    else:
+        measured_w = quick_coherence_weights(
+            dates, candidates, str(slc_dir) if slc_dir else None,
+            processor=processor,
+            slc_pattern=p.get('slc_pattern'),
+            slc_files=slc_files,
+            **quick_kwargs)
+        weight_source_used = 'quick_coherence'
 
-    measured_w: Optional[Dict[Tuple[str, str], Optional[float]]] = None
-    if source in ('coherence', 'mixed'):
-        if p.get('coh_dir'):
-            measured_w = weights_from_coherence_rasters(
-                candidates,
-                coh_dir=str(p['coh_dir']),
-                kind=str(p.get('coh_kind') or 'phsig'),
-                variant=str(p.get('coh_variant') or 'filt_mli'),
-                processor=processor,
-                stat=str(p.get('coh_stat') or 'mean'),
-                usable_threshold=float(p.get('coh_usable_threshold') or 0.3),
-                grid=int(p.get('quick_grid') or 12),
-                block=int(p.get('quick_block') or 16),
-            )
-        elif slc_dir:
-            measured_w = quick_coherence_weights(
-                dates, candidates, str(slc_dir),
-                processor=processor,
-                slc_pattern=p.get('slc_pattern'),
-                nlks=int(p.get('quick_nlks') or 1),
-                window=int(p.get('quick_window') or 5),
-                max_pixels=int(p.get('quick_max_pixels') or 1_048_576),
-                grid=int(p.get('quick_grid') or 12),
-                block=int(p.get('quick_block') or 16),
-                bbox=_as_bbox(p.get('bbox')),
-                bbox_buffer=float(p.get('bbox_buffer') or 0.0),
-                debias=_as_bool(p.get('quick_debias', True), default=True),
-                stat=str(p.get('quick_stat') or 'mean'),
-                usable_threshold=float(p.get('quick_usable_threshold') or 0.3),
-                max_workers=int(p.get('quick_max_workers') or 1),
-            )
-        else:
-            raise ValueError(
-                "weight_source='coherence'/'mixed' requires either "
-                "select.coh_dir (existing coherence rasters) or an SLC "
-                "directory (on-the-fly quick coherence)")
-
-    if source == 'coherence' and not any(
-            v is not None for v in (measured_w or {}).values()):
+    if not any(v is not None for v in (measured_w or {}).values()):
         # every candidate would get weight 0.0, which makes the augmentation
         # "not below the running mean" trivially true and silently selects the
         # complete candidate graph — fail loudly instead.
         raise ValueError(
-            "weight_source='coherence' but no coherence could be measured for "
-            "any candidate pair — check slc2ifg.slc_pattern / slc2ifg.slc_input "
-            "(on-the-fly quick coherence) or select.coh_dir (+ coh_pattern) "
-            "for existing rasters; also check that slc2ifg.bbox overlaps the "
-            "SLCs, and that select.quick_usable_threshold is not rejecting "
-            "every pair")
+            "select: no coherence could be measured for any candidate pair — "
+            f"no coherence raster under {coh_root} and the on-the-fly quick "
+            "coherence failed; check slc2ifg.slc_input (path or glob), that "
+            "slc2ifg.bbox overlaps the SLCs, and that "
+            "select.quick_usable_threshold is not rejecting every pair")
 
-    if source == 'model':
-        weights: Dict[Tuple[str, str], float] = dict(model_w)
-        weight_source_used = 'model'
-    elif source == 'coherence':
-        weights = {
-            (a, b): (v if v is not None else 0.0)
-            for (a, b), v in (measured_w or {}).items()
-        }
-        weight_source_used = ('coherence_rasters' if p.get('coh_dir')
-                              else 'quick_coherence')
-    else:  # mixed: measured takes precedence, model fills the gaps
-        weights = {}
-        for (a, b), v in (measured_w or {}).items():
-            weights[(a, b)] = v if v is not None else model_w[(a, b)]
-        weight_source_used = 'mixed'
+    weights: Dict[Tuple[str, str], float] = {
+        (a, b): (v if v is not None else 0.0)
+        for (a, b), v in measured_w.items()
+    }
 
     # 3. selection
     md = p.get('min_degree')
@@ -1408,7 +1348,6 @@ def select_pairs(
         weights,
         min_degree=min_degree,
         max_pairs=p.get('max_pairs'),
-        quality_threshold=float(p.get('quality_threshold') or 0.0),
         robust=_as_bool(p.get('robust', False)),
     )
 
@@ -1456,7 +1395,9 @@ def write_report(report: Dict[str, object], path: str) -> None:
             safe[str(k)] = v
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, 'w') as f:
-        json.dump(safe, f, indent=2, sort_keys=True)
+        # default=str keeps the parameter snapshot JSON-safe (Path objects,
+        # tuples, ... in params)
+        json.dump(safe, f, indent=2, sort_keys=True, default=str)
     logger.info("selection report written to %s", path)
 
 

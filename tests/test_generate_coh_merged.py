@@ -152,15 +152,12 @@ def test_generate_coh_dispatch(tmp_path):
     out_dir = tmp_path / 'coh'
     ret = generate_coh(processor='isce3', input_files=[str(ifg_path)],
                        output_dir=out_dir, pairs_file=str(pairs),
-                       slc_dir=[str(slc_dir)], skip_phase_sigma=False,
-                       skip_complex_coherence=False, keep_sigma=False)
+                       slc_dir=[str(slc_dir)], keep_sigma=False)
     assert ret == 0
     assert (out_dir / '20200101_20200113' / 'fullres.phsig.coh.tif').is_file()
     assert (out_dir / '20200101_20200113' / 'fullres.cpx.coh.tif').is_file()
 
 
 def test_generate_coh_requires_inputs(tmp_path):
-    # no interferogram input and no pairs -> both branches complain
-    assert generate_coh(processor='isce3', output_dir=tmp_path,
-                        skip_phase_sigma=True,
-                        skip_complex_coherence=False) == 1
+    # no interferogram input and no pairs -> nothing to do
+    assert generate_coh(processor='isce3', output_dir=tmp_path) == 1

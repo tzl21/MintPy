@@ -38,9 +38,6 @@ class IfgramListTool(Tool):
         ParamSpec('start_date', cfg='slc2ifg.ifgram_list.start_date'),
         ParamSpec('end_date', cfg='slc2ifg.ifgram_list.end_date'),
         ParamSpec('exclude_date', cfg='slc2ifg.ifgram_list.exclude_date'),
-        # unified SLC pattern; legacy select.slc_pattern as fallback
-        ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.slc_pattern'),
     ] + [
         ParamSpec(name, cfg=f'slc2ifg.ifgram_list.select.{name}',
                   kind=kind)
@@ -49,10 +46,6 @@ class IfgramListTool(Tool):
             ('temp_baseline_max', 'int'),
             ('perp_baseline_max', 'float'),
             ('perp_baseline_file', 'str'),
-            ('weight_source', 'str'),
-            ('model_tau_days', 'float'),
-            ('model_gamma0', 'float'),
-            ('quick_window', 'int'),
             ('quick_nlks', 'int'),
             ('quick_max_pixels', 'int'),
             ('quick_grid', 'int'),
@@ -62,20 +55,8 @@ class IfgramListTool(Tool):
             ('quick_debias', 'bool'),
             ('min_degree', 'int'),
             ('max_pairs', 'int'),
-            ('quality_threshold', 'float'),
             ('robust', 'bool'),
             ('verify', 'bool'),
-        ]
-    ] + [
-        # canonical top-level coherence keys, shared with the unwrap weighting
-        # and the network-selection weights (see config_map.LEGACY_ALIASES)
-        ParamSpec(name, cfg=f'slc2ifg.{name}', kind=kind)
-        for name, kind in [
-            ('coh_dir', 'str'),
-            ('coh_kind', 'str'),
-            ('coh_variant', 'str'),
-            ('coh_stat', 'str'),
-            ('coh_usable_threshold', 'float'),
         ]
     ] + [
         # unified pipeline AOI (not a select.* key): quick coherence reads
@@ -119,6 +100,13 @@ class IfgramListTool(Tool):
             params.setdefault('num_connections', 3)
             params['slc_dir'] = str(ctx.input('slc_dir'))
             params['processor'] = ctx.param('processor', 'isce3')
+            # no slc_pattern config key: infer it from the input directory
+            from mintpy.stdproc.utils.slc_input import (infer_slc_pattern,
+                                                        _walk_slc_files)
+            names = [f.name for f in _walk_slc_files(Path(ctx.input('slc_dir')))]
+            if names:
+                params['slc_pattern'] = infer_slc_pattern(
+                    names, params['processor'])
             if params.get('report_file'):
                 rp = Path(params['report_file'])
                 if not rp.is_absolute():
@@ -156,19 +144,10 @@ class CropSlcTool(Tool):
     outputs = [Port('slc_dir', 'dir')]
     resource = Resource(device='cpu', mem_estimate_gb=2.0)
     params_spec = [
-        # AOI keys: slc2ifg.bbox is the single source of truth; the legacy
-        # crop_slc.wsen/buffer keys keep working with a deprecation warning.
-        ParamSpec('wsen', cfg='slc2ifg.bbox',
-                  legacy_cfg='slc2ifg.bbox'),
-        ParamSpec('pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.slc_pattern'),
-        ParamSpec('buffer', cfg='slc2ifg.bbox_buffer',
-                  legacy_cfg='slc2ifg.bbox_buffer', kind='float',
+        # AOI keys: slc2ifg.bbox is the single source of truth.
+        ParamSpec('wsen', cfg='slc2ifg.bbox'),
+        ParamSpec('buffer', cfg='slc2ifg.bbox_buffer', kind='float',
                   default=0.0),
-        ParamSpec('geom_dir', cfg='slc2ifg.geom_dir'),
-        ParamSpec('prefix', cfg='slc2ifg.crop_slc.prefix', default=''),
-        ParamSpec('by_burst', cfg='slc2ifg.crop_slc.by_burst', kind='bool',
-                  default=False),
         # stage-specific alias; engine.no_skip_existing (injected globally)
         # also turns this on
         ParamSpec('crop_no_skip_existing',
@@ -180,10 +159,13 @@ class CropSlcTool(Tool):
 
         from mintpy.stdproc import io as sio
         from mintpy.stdproc.crop_slc import crop_slc
-        from mintpy.stdproc.utils import naming
+        from mintpy.stdproc.utils.slc_input import (infer_slc_pattern,
+                                                    _walk_slc_files)
 
         processor = ctx.param('processor')
-        in_dir = Path(ctx.input('slc_dir'))
+        raw_dirs = ctx.input('slc_dir')
+        in_dirs = [Path(d) for d in (raw_dirs if isinstance(raw_dirs, (list, tuple))
+                                     else [raw_dirs])]
         # cap the crop-internal worker pool (the engine injects its own
         # max_workers here — reusing n_cpu inside n_cpu dask threads would
         # oversubscribe the node)
@@ -193,25 +175,28 @@ class CropSlcTool(Tool):
 
         wsen = ctx.param('wsen')
         if not wsen:
-            raise ValueError("crop_slc requires slc2ifg.bbox in config (legacy alias: slc2ifg.bbox)")
+            raise ValueError("crop_slc requires slc2ifg.bbox in config")
+
+        names = [f.name for d in in_dirs for f in _walk_slc_files(d)]
+        pattern = infer_slc_pattern(names) if names else (
+            '*.slc' if processor == 'isce2' else '*.slc.*')
 
         kwargs = dict(
-            input_dir=str(in_dir),
+            input_dir=[str(d) for d in in_dirs],
             output_dir=str(out_dir),
             bbox=sio.parse_wsen(str(wsen)),
             processor=processor,
-            pattern=ctx.param('pattern') or naming.slc_pattern(processor),
+            pattern=pattern,
             buffer=float(ctx.param('buffer', 0.0) or 0.0),
-            prefix=str(ctx.param('prefix', '') or ''),
             workers=workers,
             no_skip_existing=bool(
                 ctx.param('no_skip_existing', False)
                 or ctx.param('crop_no_skip_existing', False)),
-            by_burst=bool(ctx.param('by_burst', False)),
+            # burst nesting is derived from the input paths (extract_burst_id);
+            # a single-burst input forces the flat layout
+            by_burst=True,
             no_burst_dirs=bool(ctx.inputs.get('no_burst_dirs', False)),
         )
-        if ctx.param('geom_dir'):
-            kwargs['geom_dir'] = str(ctx.param('geom_dir'))
         # date-filtered file list provided by the engine takes precedence over
         # the directory scan
         file_list = ctx.inputs.get('file_list')
