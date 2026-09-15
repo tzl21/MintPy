@@ -40,6 +40,13 @@ def create_parser(subparsers=None):
     parser.add_argument('--of', '--out-format', '--output-format', dest='out_format', default='GTiff',
                         help='file format as defined by GDAL driver name, e.g. GTiff, ENVI (default: %(default)s).\n'
                              'GDAL driver names can be found at https://gdal.org/drivers/raster/index.html')
+    parser.add_argument('--geo', dest='geo', choices=['auto', 'yes', 'no'], default='auto',
+                        help='write georeferencing (geotransform + projection):\n'
+                             'auto - write it when the input metadata has a complete geotransform (default)\n'
+                             'yes  - require it, error out when the input is not geocoded\n'
+                             'no   - never write it (radar-coordinate / plain raster)')
+    parser.add_argument('--compress', dest='compress', default=None,
+                        help='GDAL COMPRESS creation option for GTiff, e.g. LZW, DEFLATE (default: %(default)s)')
     return parser
 
 
@@ -53,8 +60,15 @@ def cmd_line_parse(iargs=None):
 
     # check: input file coordinate system
     atr = readfile.read_attribute(inps.file)
-    if 'X_FIRST' not in atr.keys():
+    is_geocoded = 'Y_FIRST' in atr.keys() and 'X_FIRST' in atr.keys()
+
+    # --geo is translated to the write_gdal() geo argument
+    if inps.geo == 'yes' and not is_geocoded:
         raise ValueError(f'ERROR: Input file ({inps.file}) is not geocoded!')
+    elif inps.geo == 'no':
+        inps.geo = False
+    else:
+        inps.geo = None
 
     return inps
 
