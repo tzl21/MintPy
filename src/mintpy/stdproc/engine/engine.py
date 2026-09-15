@@ -230,16 +230,9 @@ class Engine:
 
         # Read-time crop mode (default): with crop_slc absent, generate_ifgram
         # reads only the slc2ifg.bbox region from the SLCs — no cropped SLC
-        # files are stored.  isce2 (radar) SLCs are not georeferenced, so this
-        # mode requires the crop_slc stage.
-        if not has_crop:
-            from mintpy.stdproc.engine.config import get_opt
-            bbox_raw = get_opt(self.config.raw, 'slc2ifg.bbox')
-            if bbox_raw and self.processor == 'isce2':
-                raise ValueError(
-                    "engine: slc2ifg.bbox read-time crop requires geocoded "
-                    "SLCs (isce3 GeoTIFF/HDF5) — for isce2 enable the "
-                    "'crop_slc' stage instead")
+        # files are stored.  isce2 radar SLCs are handled through the standard
+        # merged/geom_reference lookup tables (io.bbox_to_window), so no
+        # crop_slc stage is required either.
 
         bursts_all = self.slc.bursts
         multi = len([b for b in bursts_all if b is not None]) > 1

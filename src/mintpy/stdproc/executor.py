@@ -354,20 +354,13 @@ class BasicExecutor(Slc2ifgExecutor):
 
         # Read-time crop (default): with crop_slc absent, generate_ifgram
         # reads only the slc2ifg.bbox region of the SLCs — no cropped SLC
-        # files are stored.  isce2 (radar) SLCs are not georeferenced, so
-        # this mode requires the crop_slc stage.
+        # files are stored.  isce2 radar SLCs are handled through the standard
+        # merged/geom_reference lookup tables (io.bbox_to_window).
         bbox_cfg = None
         if 'crop_slc' not in tools:
-            wsen = self._opt('slc2ifg.bbox') or self._opt('slc2ifg.bbox')
+            wsen = self._opt('slc2ifg.bbox')
             if wsen:
-                if processor == 'isce2':
-                    raise ValueError(
-                        "slc2ifg.bbox read-time crop requires geocoded SLCs "
-                        "(isce3 GeoTIFF/HDF5) — for isce2 enable the "
-                        "'crop_slc' stage instead")
-                buffer = self._opt_float(
-                    'slc2ifg.bbox_buffer',
-                    self._opt_float('slc2ifg.bbox_buffer', 0.0))
+                buffer = self._opt_float('slc2ifg.bbox_buffer', 0.0)
                 bbox_cfg = (str(wsen), float(buffer))
 
         # ---------- phase 1: per-burst ifgram_list + generate_ifgram -------

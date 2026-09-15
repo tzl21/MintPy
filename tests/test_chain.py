@@ -597,6 +597,36 @@ def test_engine_entry_mode_via_stages():
     ]
 
 
+def test_engine_isce2_bbox_readtime_crop_needs_no_crop_stage(tmp_path):
+    """isce2 bbox is a read-time crop through the standard geom; no crop_slc."""
+    from mintpy.stdproc.engine.config import load_engine_config
+    from mintpy.stdproc.engine.engine import Engine
+
+    merged = tmp_path / 'merged'
+    geom = merged / 'geom_reference'
+    geom.mkdir(parents=True)
+    (geom / 'lat.rdr.full').touch()
+    (geom / 'lon.rdr.full').touch()
+    for d in ('20220105', '20220117'):
+        p = merged / 'SLC' / d / f'{d}.slc.full'
+        p.parent.mkdir(parents=True)
+        p.touch()
+    cfg = tmp_path / 'mini.cfg'
+    cfg.write_text(
+        f'slc2ifg.work_dir = {tmp_path}\n'
+        f'slc2ifg.slc_input = {merged}/SLC/*\n'
+        'slc2ifg.processor = isce2\n'
+        'slc2ifg.bbox = -155.3 19.3 -155.2 19.4\n'
+        'engine.tools = ifgram_list,generate_ifgram\n'
+        'engine.gpu = false\n')
+    g = Engine(load_engine_config(str(cfg))).plan(dry_run=True)
+    assert 'generate_ifgram#single#20220105_20220117' in g.nodes
+    assert 'crop_slc' not in g.nodes
+    # the read-time crop params are forwarded to the tool
+    p = g.nodes['generate_ifgram#single#20220105_20220117'].ctx.params
+    assert str(p['bbox']).strip() == '-155.3 19.3 -155.2 19.4'
+
+
 def test_engine_entry_mode_crop_rejected():
     try:
         _entry_engine(tools='crop_slc,phsig_coh,unwrap').plan(dry_run=True)
