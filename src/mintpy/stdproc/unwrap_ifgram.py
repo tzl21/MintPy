@@ -77,12 +77,13 @@ def _open_wbd(wbd_path):
     p = str(wbd_path)
     base = os.path.splitext(p)[0]
 
-    # 1) GDAL-readable companion (.vrt)
-    vrt = base + '.vrt'
-    if os.path.isfile(vrt):
-        ds = gdal.Open(vrt, gdal.GA_ReadOnly)
-        if ds is not None:
-            return ds
+    # 1) GDAL-readable companion (.vrt): the usual layout is
+    #    ``xxx.wbd.vrt`` (sardem), but ``xxx.vrt`` is also accepted.
+    for vrt in (p + '.vrt', base + '.vrt'):
+        if os.path.isfile(vrt):
+            ds = gdal.Open(vrt, gdal.GA_ReadOnly)
+            if ds is not None:
+                return ds
 
     # 2) ISCE-style .rsc companion: the binary is `xxx.wbd` and its
     #    metadata is `xxx.wbd.rsc` (NOT `xxx.rsc` — keep the .wbd stem).
@@ -121,9 +122,10 @@ def _open_wbd(wbd_path):
         ds.GetRasterBand(1).WriteArray(data)
         return ds
 
-    # 3) earthscope-style .json companion
-    js = base + '.json'
-    if os.path.isfile(js):
+    # 3) earthscope-style .json companion (``xxx.wbd.json`` or ``xxx.json``)
+    js = next((c for c in (p + '.json', base + '.json')
+               if os.path.isfile(c)), None)
+    if js:
         import json
         with open(js) as f:
             meta = json.load(f)
