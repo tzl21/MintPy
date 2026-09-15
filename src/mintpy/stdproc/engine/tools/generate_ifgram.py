@@ -77,6 +77,17 @@ class GenerateIfgramTool(Tool):
         ifg_path = ctx.output('ifg')
         vrt_path = pair_dir / 'fullres.int.vrt'
 
+        # engine.no_skip_existing => recompute everything.  The VRT is an
+        # intermediate (not a declared output port), so refresh it as well:
+        # a stale VRT would otherwise keep the sources / metadata of an older
+        # code path (e.g. a geoless VRT built with GDAL's HDF5 driver) for
+        # every product derived from it.
+        if ctx.param('no_skip_existing', False) and vrt_path.exists():
+            try:
+                vrt_path.unlink()
+            except OSError:
+                pass
+
         # Read-time crop: map the bbox to this pair's SLC pixel window
         window = None
         bbox = ctx.param('bbox')

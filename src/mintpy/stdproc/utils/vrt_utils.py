@@ -40,21 +40,15 @@ def _format_nc_filename(filepath: Union[str, Path], subdataset: Optional[str] = 
     """Format a filepath for GDAL, handling HDF5/NetCDF subdatasets.
 
     When ``subdataset`` is not given, the polarization subdataset of an HDF5
-    SLC is auto-detected (preferring VV).
+    SLC is auto-detected (preferring VV).  Delegates to
+    :func:`mintpy.stdproc.io.hdf5_gdal_source` so the VRT sources and the
+    readers share the very same connection string (and georeferencing).
     """
-    if _is_hdf5(str(filepath)):
-        if not subdataset:
-            try:
-                from mintpy.stdproc.io import detect_hdf5_subdataset
-                subdataset = detect_hdf5_subdataset(filepath)
-            except Exception:
-                subdataset = None
-        if subdataset:
-            # GDAL's HDF5 driver needs the object path introduced by '//'
-            # (e.g. HDF5:"f.h5"://data/VV); a single '/' is rejected with
-            # "No such file or directory".
-            return f'HDF5:"{filepath}"://{str(subdataset).lstrip("/")}'
-    return str(filepath)
+    # The NETCDF driver is used because it understands the CF metadata
+    # (x/y_coordinates + grid_mapping) and therefore keeps the real
+    # geotransform / CRS of an OPERA-style CSLC; the HDF5 driver reports none.
+    from mintpy.stdproc.io import hdf5_gdal_source
+    return hdf5_gdal_source(filepath, subdataset, probe=True)
 
 
 def _is_hdf5(path: str) -> bool:
@@ -205,8 +199,10 @@ class VRTInterferogram:
             if len(sources) >= 2:
                 ref_slc = sources[0]
                 sec_slc = sources[1]
-                # Check for HDF5 subdataset pattern
-                m = re.match(r'HDF5:"([^"]+)":(.+)', ref_slc)
+                # HDF5 / NETCDF subdataset pattern, e.g.
+                #   NETCDF:"f.h5":"//data/VV"   or   HDF5:"f.h5"://data/VV
+                m = re.match(r'(?:HDF5|NETCDF):"([^"]+)":(?:"?//?)?(.+?)"?$',
+                             ref_slc)
                 if m:
                     ref_slc = m.group(1)
                     subdataset = m.group(2)
