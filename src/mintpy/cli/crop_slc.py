@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 EXAMPLE = """example:
   # ISCE3 (geocoded) input
   crop_slc.py --processor isce3 --input-dir ./slc --output-dir ./cropped --bbox 102.8 27.3 103.3 27.6
+
+  # ISCE2 (radar coordinates): the standard <merged>/geom_reference next to
+  # the SLC tree is used automatically (lat.rdr.full / lon.rdr.full)
+  crop_slc.py --processor isce2 --input-dir '../merged/SLC/*' --pattern '*.slc.full' \\
+      --output-dir ./cropped --bbox -155.32 19.30 -155.14 19.43
 """
 
 
@@ -61,9 +66,6 @@ def create_parser(subparsers=None):
 def cmd_line_parse(iargs=None):
     parser = create_parser()
     inps = parser.parse_args(args=iargs)
-    if inps.processor == 'isce2':
-        parser.error('bbox cropping requires geocoded (isce3) SLCs; isce2 '
-                     'radar-coordinate SLCs have no georeferencing to crop by bbox')
     return inps
 
 

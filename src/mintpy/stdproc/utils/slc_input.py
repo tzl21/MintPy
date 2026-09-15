@@ -43,6 +43,7 @@ DATE_RE = re.compile(r'(20\d{6})')
 SLC_PATTERNS: Tuple[str, ...] = (
     '*.slc.tif',
     '*.slc.h5',
+    '*.slc.full',      # ISCE2 topsApp merged SLC (ENVI + .hdr/.xml)
     '*.slc',
     '*.h5',
     '*.hdf5',
@@ -198,6 +199,38 @@ def _date_of(path: Path, max_up: int = 4) -> Optional[str]:
             break
         if len(parent.name) == 8 and extract_date(parent.name):
             return parent.name
+    return None
+
+
+#: standard ISCE2 geometry directory name (topsApp merged tree)
+GEOM_DIR_NAME = 'geom_reference'
+
+
+def standard_geom_dir(slc_input) -> Optional[Path]:
+    """Standard ISCE2 geometry dir derived from ``slc2ifg.slc_input``.
+
+    The ISCE2 topsApp tree keeps the SLCs in ``<merged>/SLC`` and the geometry
+    in ``<merged>/geom_reference`` (``lat.rdr.full`` / ``lon.rdr.full`` / ...).
+    ``slc_input`` is typically ``<merged>/SLC/*``; the non-glob prefix and its
+    ancestors are searched for a ``geom_reference`` directory, so the location
+    is fixed by the standard layout and needs no configuration key.
+
+    Returns ``None`` when no ``geom_reference`` directory is found.
+    """
+    if isinstance(slc_input, (list, tuple)):
+        slc_input = slc_input[0] if slc_input else ''
+    raw = str(slc_input)
+    cut = len(raw)
+    for i, ch in enumerate(raw):
+        if ch in '*?[':
+            cut = i
+            break
+    prefix = raw[:cut].rstrip('/') or '.'
+    p = Path(prefix).resolve()
+    for base in [p] + list(p.parents):
+        cand = base / GEOM_DIR_NAME
+        if cand.is_dir():
+            return cand
     return None
 
 
