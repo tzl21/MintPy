@@ -133,8 +133,57 @@ def detect_hdf5_subdataset(hdf5_path: Union[str, Path],
     return None
 
 
+def hdf5_gdal_source(file_path: Union[str, Path],
+                     subdataset: Optional[str] = None,
+                     probe: bool = False) -> str:
+    """Return the GDAL connection string of a raster / HDF5 subdataset.
+
+    HDF5 / NetCDF files are addressed through the ``NETCDF`` driver because it
+    honours the CF metadata (``x_coordinates`` / ``y_coordinates`` /
+    ``grid_mapping``) and therefore reports the real geotransform and CRS of an
+    OPERA-style CSLC.  The ``HDF5`` driver returns NO georeferencing for the
+    very same file, which silently strips the geotransform from every product
+    derived from it.
+
+    With ``probe=True`` the NETCDF connection is opened once and the HDF5 form
+    (``HDF5:"<file>"://<subdataset>``) is used as a fallback when the file is
+    not CF-compliant, so the data stays readable even though its
+    georeferencing then depends on the file itself.
+    """
+    path = str(file_path)
+    if not is_hdf5_file(path):
+        return path
+
+    subdataset = detect_hdf5_subdataset(path, subdataset)
+    if not subdataset:
+        return path
+
+    sub = str(subdataset).lstrip('/')
+    netcdf = f'NETCDF:"{path}":"//{sub}"'
+    if not probe:
+        return netcdf
+
+    from osgeo import gdal
+
+    gdal.PushErrorHandler('CPLQuietErrorHandler')
+    try:
+        ds = gdal.Open(netcdf, gdal.GA_ReadOnly)
+    finally:
+        gdal.PopErrorHandler()
+    if ds is not None:
+        ds = None
+        return netcdf
+
+    logger.debug('netCDF driver cannot open %s; falling back to the HDF5 '
+                 'driver (georeferencing depends on the file itself)', path)
+    return f'HDF5:"{path}"://{sub}'
+
+
 def open_raster(file_path: Union[str, Path], subdataset: Optional[str] = None):
     """Open a raster with GDAL, resolving HDF5 subdatasets.
+
+    See :func:`hdf5_gdal_source`: the CF-aware NETCDF driver is used for
+    HDF5/NetCDF containers, so OPERA-style metadata is honoured.
 
     For ``.h5`` files the ``NETCDF`` driver prefix is used (same as dolphin's
     VRT sources), so GDAL's netCDF driver reads OPERA-style metadata
@@ -156,11 +205,7 @@ def open_raster(file_path: Union[str, Path], subdataset: Optional[str] = None):
     """
     from osgeo import gdal
 
-    path = str(file_path)
-    if is_hdf5_file(path):
-        subdataset = detect_hdf5_subdataset(path, subdataset)
-    if subdataset and is_hdf5_file(path):
-        path = f'NETCDF:"{path}":"//{str(subdataset).lstrip("/")}"'
+    path = hdf5_gdal_source(file_path, subdataset)
     return gdal.Open(path, gdal.GA_ReadOnly)
 
 
@@ -361,6 +406,174 @@ def build_gdal_metadata(meta: Optional[Dict], processor: Optional[str] = None) -
     return items
 
 
+def _is_missing(value) -> bool:
+    """True when a metadata value is unset: None, an empty string or NaN."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ''
+    try:
+        return bool(value != value)   # NaN, incl. numpy scalars
+    except Exception:
+        return False
+
+
+def resolve_geo(meta: Optional[Dict], geo: Optional[bool] = None):
+    """Decide whether to write the geotransform / projection of ``meta``.
+
+    Parameters
+    ----------
+    meta : dict, metadata with optional X/Y_FIRST, X/Y_STEP and EPSG/UTM_ZONE
+    geo : None / True / False
+        None  - auto: write geo only for a complete geotransform
+        True  - require geo (ValueError when incomplete)
+        False - never write geo (radar-coordinate products)
+
+    Returns
+    -------
+    (write_geo, epsg) : (bool, int or None)
+    """
+    meta = meta or {}
+    gt_keys = ('X_FIRST', 'X_STEP', 'Y_FIRST', 'Y_STEP')
+    has_gt = all(not _is_missing(meta.get(k)) for k in gt_keys)
+    has_epsg = not _is_missing(meta.get('EPSG'))
+    has_utm = not _is_missing(meta.get('UTM_ZONE'))
+
+    if geo is False:
+        return False, None
+
+    if geo is True:
+        if not has_gt:
+            raise ValueError(
+                'geo=True but incomplete geotransform in metadata: '
+                f'{[k for k in gt_keys if _is_missing(meta.get(k))]}')
+        if not (has_epsg or has_utm):
+            raise ValueError('geo=True but no EPSG / UTM_ZONE in metadata')
+    elif not has_gt:
+        # plain / radar-coordinate product: no georeferencing, no warning
+        return False, None
+
+    if has_epsg:
+        epsg = int(float(meta['EPSG']))
+    elif has_utm:
+        from mintpy.utils import utils as ut
+        epsg = int(ut.utm_zone2epsg_code(meta['UTM_ZONE']))
+    else:
+        epsg = 4326
+        logger.warning('No EPSG / UTM_ZONE in metadata; assuming EPSG:4326')
+
+    return True, epsg
+
+
+def write_gdal(data, meta, out_file, out_fmt: str = 'GTiff',
+               geo: Optional[bool] = None, compress: Optional[str] = None,
+               tiled: bool = False, nodata=None, atomic: bool = False,
+               gdal_metadata: Optional[Dict] = None):
+    """Write a 2D array as a GDAL raster, keeping the georeferencing.
+
+    Native stdproc writer: the same ``GetDriverByName`` / ``Create`` /
+    ``SetGeoTransform`` / ``SetProjection`` / ``WriteArray`` sequence used by
+    the individual slc2ifg stages.  ``meta`` drives the geotransform through
+    X/Y_FIRST and X/Y_STEP plus EPSG (or UTM_ZONE); see :func:`resolve_geo` for
+    the meaning of ``geo``.
+
+    Parameters
+    ----------
+    data : np.ndarray, 2D
+    meta : dict, see resolve_geo()
+    out_file : str or Path
+    out_fmt : str, GDAL driver name ('GTiff')
+    geo : None / True / False, see resolve_geo()
+    compress, tiled : GTiff creation options
+    nodata : float, optional
+    atomic : bool, write to '<out_file>.tmp' and rename on success
+    gdal_metadata : dict, optional, GDAL metadata items
+
+    Returns
+    -------
+    out_file : str
+    """
+    import numpy as np
+    from osgeo import gdal, osr
+
+    meta = meta or {}
+    write_geo, epsg = resolve_geo(meta, geo=geo)
+    if write_geo:
+        # https://gdal.org/tutorials/geotransforms_tut.html
+        transform = (
+            float(meta['X_FIRST']), float(meta['X_STEP']), 0.0,
+            float(meta['Y_FIRST']), 0.0, float(meta['Y_STEP']),
+        )
+
+    data = np.asarray(data)
+    if data.dtype == bool:
+        logger.debug('writing a boolean array as uint8 (GDAL has no bool)')
+        data = data.astype(np.uint8)
+
+    from mintpy.utils import readfile
+    gdal_type = readfile.DATA_TYPE_NUMPY2GDAL[str(data.dtype)]
+
+    out_file = str(out_file)
+    out_dir = os.path.dirname(os.path.abspath(out_file))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    write_file = out_file + '.tmp' if atomic else out_file
+
+    options = []
+    if out_fmt == 'GTiff':
+        if compress:
+            options.append(f'COMPRESS={compress}')
+        if tiled:
+            options.append('TILED=YES')
+        options.append('BIGTIFF=IF_SAFER')
+
+    driver = gdal.GetDriverByName(out_fmt)
+    if driver is None:
+        raise RuntimeError(f'GDAL driver not available: {out_fmt}')
+
+    rows, cols = data.shape
+    raster = driver.Create(write_file, cols, rows, 1, gdal_type,
+                           options=options)
+    if raster is None:
+        raise RuntimeError(f'cannot create raster: {write_file}')
+
+    try:
+        if write_geo:
+            raster.SetGeoTransform(transform)
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(epsg)
+            raster.SetProjection(srs.ExportToWkt())
+
+        if gdal_metadata:
+            for key, value in gdal_metadata.items():
+                if value is not None:
+                    raster.SetMetadataItem(str(key), str(value))
+
+        band = raster.GetRasterBand(1)
+        band.WriteArray(data)
+        if nodata is not None:
+            band.SetNoDataValue(float(nodata))
+
+        band.FlushCache()
+        band = None
+        raster = None
+    except BaseException:
+        raster = None
+        for stray in (write_file, write_file + '.hdr',
+                      write_file + '.aux.xml'):
+            if os.path.isfile(stray):
+                os.remove(stray)
+        raise
+
+    if atomic:
+        # rename the data file and the driver's companion .hdr, if any
+        os.replace(write_file, out_file)
+        if os.path.isfile(write_file + '.hdr'):
+            os.replace(write_file + '.hdr', out_file + '.hdr')
+
+    return out_file
+
+
 def write_raster(data, out_file: Union[str, Path], meta: Optional[Dict] = None,
                  like: Optional[Union[str, Path]] = None, driver: str = 'GTiff',
                  geo: Optional[bool] = None, compress: Optional[str] = 'LZW',
@@ -385,7 +598,7 @@ def write_raster(data, out_file: Union[str, Path], meta: Optional[Dict] = None,
         GDAL driver name (``GTiff`` for both processors in slc2ifg).
     geo : None / True / False
         None  - write geo only when the metadata has a complete geotransform
-                (and a CRS; see save_gdal.resolve_geo)
+                (and a CRS; see :func:`resolve_geo`)
         True  - require geo
         False - never write geo (radar-coordinate products)
     compress, tiled : GTiff creation options.
@@ -428,8 +641,7 @@ def write_raster(data, out_file: Union[str, Path], meta: Optional[Dict] = None,
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    from mintpy.save_gdal import write_gdal
-    write_gdal(data, full_meta, out_file=out_file, out_fmt=driver, geo=geo,
+    write_gdal(data, full_meta, out_file, out_fmt=driver, geo=geo,
                compress=compress, tiled=tiled, nodata=nodata, atomic=atomic,
                gdal_metadata=gdal_metadata)
 
