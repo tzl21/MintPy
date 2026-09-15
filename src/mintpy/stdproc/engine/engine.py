@@ -69,6 +69,18 @@ def _make_slc_input(config) -> Optional[SlcInput]:
         return None
 
 
+def _log_summary(text: str) -> None:
+    """Log a multi-line summary one line per record.
+
+    A single multi-line log record only carries the logging prefix on its
+    first line; the continuation lines end up unprefixed and get interleaved
+    with concurrent task logs.  Emitting one record per line keeps every line
+    attributable.
+    """
+    for line in str(text).splitlines():
+        logger.info("%s", line)
+
+
 def _legacy_opt(cfg, new_key: str, legacy_key: str, kind: str,
                 default=None):
     """Read a config option, falling back to a deprecated legacy key.
@@ -1326,7 +1338,7 @@ class Engine:
         # Full node-by-node listing only when reviewing the plan or debugging;
         # normal runs get a compact per-tool count (keeps logs readable).
         verbose_summary = dry_run or logger.isEnabledFor(logging.DEBUG)
-        logger.info("\n%s", graph.summary(verbose=verbose_summary))
+        _log_summary(graph.summary(verbose=verbose_summary))
         if dry_run:
             dot = graph.to_dot()
             (self.engine_dir / 'graph.dot').write_text(dot)
@@ -1419,7 +1431,7 @@ class Engine:
         sub.validate()
         logger.info("Standalone tool '%s': %d node(s)", tool_name, len(keys))
         if dry_run:
-            logger.info("\n%s", sub.summary())
+            _log_summary(sub.summary())
             return True
 
         from mintpy.stdproc.engine.resources import build_resource_plan

@@ -589,7 +589,7 @@ def process_batch_files(args):
                 logger.error(f"FAILED {Path(input_file).name}: {message}")
                 error_count += 1
 
-    logger.info("\nBatch processing complete:")
+    logger.info("Batch processing complete:")
     logger.info(f"  Successfully processed: {successful_count} files")
     logger.info(f"  Errors: {error_count} files")
     logger.info(f"  Output directory: {output_dir}")
