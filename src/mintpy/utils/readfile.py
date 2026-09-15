@@ -738,7 +738,10 @@ def read_binary_file(fname, datasetName=None, box=None, xstep=1, ystep=1):
         xstep=xstep,
         ystep=ystep,
     )
-    if processor in ['gdal', 'gmtsar', 'hyp3', 'cosicorr', 'isce3']:
+    # GDAL-readable rasters always go through GDAL, even when the processor was
+    # inferred as a binary one (e.g. ROI_PAC from an .rsc sidecar next to a .tif)
+    if (processor in ['gdal', 'gmtsar', 'hyp3', 'cosicorr', 'isce3']
+            or fext in GDAL_FILE_EXTS):
         data = read_gdal(fname, **kwargs)
 
     else:
@@ -1255,9 +1258,34 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
         elif len(metafiles) == 0:
             raise FileNotFoundError(f'No metadata file found for data file: {fname}')
 
+        # GDAL-readable raster: data is ALWAYS read with GDAL, whatever sidecars
+        # (.rsc / .xml / .hdr) are present.  Reading it as a raw binary (which is
+        # what PROCESSOR='roipac'/'isce' would trigger) returns garbage.
+        is_gdal_raster = fext in GDAL_FILE_EXTS
+
         atr = {}
         # PROCESSOR
-        if fname.endswith('.img') and any(i.endswith('.hdr') for i in metafiles):
+        if is_gdal_raster:
+            atr['PROCESSOR'] = 'gdal'
+            # Recognize ISCE3/Dolphin geocoded products by naming pattern.
+            # Dolphin may name the files "fullres.unw.tif" with the date pair
+            # in the parent directory name (e.g. ifgrams/20220105_20220117/).
+            if (fext in ['.tif', '.tiff']
+                    and (fbase.endswith('.unw') or fbase.endswith('.cor')
+                         or fbase.endswith('.int') or fbase.endswith('.unw.conncomp'))):
+                has_date_pair = bool(re.search(r'\d{8}_\d{8}', fbase))
+                if not has_date_pair:
+                    has_date_pair = bool(
+                        re.search(r'\d{8}_\d{8}', os.path.basename(os.path.dirname(fname))))
+                if has_date_pair:
+                    # geocoded products only: a radar-coordinate GeoTIFF has no
+                    # geotransform and stays PROCESSOR='gdal'
+                    isce3_meta = read_isce3_geotiff(fname)
+                    if isce3_meta is not None:
+                        atr['PROCESSOR'] = 'isce3'
+                        atr.update(isce3_meta)
+
+        elif fname.endswith('.img') and any(i.endswith('.hdr') for i in metafiles):
             atr['PROCESSOR'] = 'snap'
 
         elif any(i.endswith(('.xml', '.hdr', '.vrt')) for i in metafiles):
@@ -1273,25 +1301,6 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
             if 'PROCESSOR' not in atr.keys():
                 atr['PROCESSOR'] = 'roipac'
 
-        elif fext in GDAL_FILE_EXTS:
-            atr['PROCESSOR'] = 'gdal'
-            # Recognize ISCE3/Dolphin geocoded products by naming pattern.
-            # Dolphin may name the files "fullres.unw.tif" with the date pair
-            # in the parent directory name (e.g. ifgrams/20220105_20220117/).
-            if (fext in ['.tif', '.tiff']
-                    and (fbase.endswith('.unw') or fbase.endswith('.cor')
-                         or fbase.endswith('.int') or fbase.endswith('.unw.conncomp'))):
-                has_date_pair = bool(re.search(r'\d{8}_\d{8}', fbase))
-                if not has_date_pair:
-                    has_date_pair = bool(
-                        re.search(r'\d{8}_\d{8}', os.path.basename(os.path.dirname(fname))))
-                if has_date_pair:
-                    atr['PROCESSOR'] = 'isce3'
-                    # supplement with ISCE3-specific attributes (DATA_TYPE,
-                    # EPSG, DATE12, ...); any .rsc sidecar (read below) still
-                    # takes priority over these values.
-                    atr.update(read_isce3_geotiff(fname))
-
         if 'PROCESSOR' not in atr.keys():
             atr['PROCESSOR'] = 'mintpy'
 
@@ -1302,7 +1311,22 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
         # ignore certain meaningless file extensions
         fbase, fext = _get_file_base_and_ext(fname)
 
-        if meta_ext == '.rsc':
+        if is_gdal_raster:
+            # the raster itself is the primary metadata source; an .rsc sidecar
+            # only supplements it (DATE12, P_BASELINE, ...)
+            atr.update(read_gdal_vrt(fname))
+            rsc_file = fname + '.rsc'
+            if os.path.isfile(rsc_file):
+                for key, value in read_roipac_rsc(rsc_file).items():
+                    atr.setdefault(key, value)
+            # name-based product type, e.g. '.slc' for 20200101.slc.tif or
+            # '.cor' for fullres.phsig.coh.tif (isce3 detection above wins)
+            ftype = product_file_type(fname)
+            if ftype:
+                atr['FILE_TYPE'] = ftype
+            atr.setdefault('FILE_TYPE', fext)
+
+        elif meta_ext == '.rsc':
             atr.update(read_roipac_rsc(metafile))
             if 'FILE_TYPE' not in atr.keys():
                 atr['FILE_TYPE'] = fext
@@ -1408,12 +1432,56 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
     return atr
 
 
+def product_file_type(fname):
+    """Infer the MintPy FILE_TYPE of an slc2ifg-style product from its file name.
+
+    Recognizes the pipeline naming (``fullres.int.tif``, ``mli.unw.tif``,
+    ``fullres.unw.conncomp.tif``, ``fullres.phsig.coh.tif``, ``20200101.slc.tif``).
+    Returns None for unrecognized names.
+
+    Parameters: fname - str, path to the file
+    Returns:    ftype - str or None, e.g. '.int', '.unw', '.cor', '.slc'
+    """
+    fbase = os.path.basename(str(fname)).lower()
+    for suffix, ftype in (
+        ('.unw.conncomp.tif', '.unw.conncomp'),
+        ('.cpx.coh.tif', '.cor'),
+        ('.phsig.coh.tif', '.cor'),
+        ('.coh.tif', '.cor'),
+        ('.int.tif', '.int'),
+        ('.unw.tif', '.unw'),
+        ('.slc.tif', '.slc'),
+    ):
+        if fbase.endswith(suffix):
+            return ftype
+    return None
+
+
+def _get_geotransform(ds):
+    """Return the geotransform of a GDAL dataset, or None when not georeferenced.
+
+    GDAL returns the default identity transform (0, 1, 0, 0, 0, 1) for a raster
+    without a geotransform; can_return_null=True returns None instead, which is
+    what makes radar-coordinate / plain rasters distinguishable from geo ones.
+    """
+    try:
+        return ds.GetGeoTransform(can_return_null=True)
+    except TypeError:
+        # older GDAL python bindings without the can_return_null keyword
+        gt = ds.GetGeoTransform()
+        identity = (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        return None if (not ds.GetProjection() and tuple(gt) == identity) else gt
+
+
 def read_isce3_geotiff(fname):
     """Read attributes from ISCE3/Dolphin GeoTIFF file (e.g., .int.tif / .unw.tif).
 
     NOTE: called from read_attribute() for ISCE3/Dolphin geocoded products to
     supplement the common attributes (DATA_TYPE, EPSG, DATE12, ...). Any .rsc
     sidecar file is still given priority over these values.
+
+    Returns None when the file has no georeferencing (e.g. a radar-coordinate
+    GeoTIFF written by the isce2 pipeline), so the caller keeps PROCESSOR='gdal'.
     """
     from osgeo import gdal, osr
 
@@ -1421,21 +1489,25 @@ def read_isce3_geotiff(fname):
     if ds is None:
         raise ValueError(f"Cannot open {fname} with GDAL")
 
+    # a geocoded ISCE3/Dolphin product always carries a geotransform
+    gt = _get_geotransform(ds)
+    if gt is None:
+        ds = None
+        return None
+
     meta = {}
     # Image dimensions
     meta['LENGTH'] = str(ds.RasterYSize)
     meta['WIDTH'] = str(ds.RasterXSize)
 
-    # Geotransform
-    gt = ds.GetGeoTransform()
+    # Geotransform (already verified as present above)
     meta['X_FIRST'] = str(gt[0])
     meta['Y_FIRST'] = str(gt[3])
     meta['X_STEP'] = str(abs(gt[1]))
     meta['Y_STEP'] = str(abs(gt[5]))
-    meta['X_UNIT'] = 'meters'
-    meta['Y_UNIT'] = 'meters'
 
-    # Projection
+    # Projection / coordinate unit (only when an SRS is attached; read_gdal_vrt
+    # fills in the unit otherwise)
     proj = ds.GetProjection()
     if proj:
         srs = osr.SpatialReference()
@@ -1443,6 +1515,9 @@ def read_isce3_geotiff(fname):
         if srs.IsGeographic():
             meta['X_UNIT'] = 'degrees'
             meta['Y_UNIT'] = 'degrees'
+        else:
+            meta['X_UNIT'] = 'meters'
+            meta['Y_UNIT'] = 'meters'
         epsg = srs.GetAuthorityCode(None)
         if epsg:
             meta['EPSG'] = epsg
@@ -1459,13 +1534,9 @@ def read_isce3_geotiff(fname):
         meta['NO_DATA_VALUE'] = 'nan' if np.isnan(ndv) else str(float(ndv))
 
     # File type and processor
-    fbase = os.path.basename(fname).lower()
-    if fbase.endswith('.int.tif'):
-        meta['FILE_TYPE'] = '.int'
-    elif fbase.endswith('.cor.tif'):
-        meta['FILE_TYPE'] = '.cor'
-    elif 'unw' in fbase:
-        meta['FILE_TYPE'] = '.unw'
+    ftype = product_file_type(fname)
+    if ftype:
+        meta['FILE_TYPE'] = ftype
     meta['PROCESSOR'] = 'isce3'
 
     # Extract DATE12 from the file name (or its parent directory, e.g. Dolphin
@@ -1796,7 +1867,13 @@ def read_envi_hdr(fname):
 
 
 def read_gdal_vrt(fname):
-    """Read GDAL .vrt file into a python dict structure using gdal
+    """Read a GDAL-readable raster (.vrt / .tif / .grd / ...) into a python dict using gdal
+
+    Rasters WITHOUT georeferencing (e.g. radar-coordinate GeoTIFF products) are
+    supported: no X/Y_FIRST/STEP, EPSG or UTM_ZONE is written in that case, and
+    X/Y_UNIT are set to 'pixel' so that downstream code can tell radar from geo
+    data.  Metadata embedded in the file itself (written by save_gdal) is merged
+    into the output dictionary.
 
     Modified from $ISCE_HOME/applications/gdal2isce_xml.gdal2isce_xml() written by David Bekaert.
     """
@@ -1820,37 +1897,53 @@ def read_gdal_vrt(fname):
     interleave = ds.GetMetadata('IMAGE_STRUCTURE').get('INTERLEAVE', 'PIXEL')
     atr['INTERLEAVE'] = ENVI_BAND_INTERLEAVE[interleave]
 
-    # transformation contains gridcorners
-    #   lines/pixels with a spacing of 1/-1 OR lonlat with a spacing of deltalon/deltalat
-    # GDAL uses the upper-left corner of the upper-left pixel as the first coordinate,
-    #   which is the same as ROI_PAC and MintPy
-    #   link: https://gdal.org/tutorials/geotransforms_tut.html
-    transform = ds.GetGeoTransform()
-    x0 = transform[0]
-    y0 = transform[3]
-    x_step = abs(transform[1])
-    y_step = abs(transform[5]) * -1.
+    # metadata embedded in the raster (e.g. PROCESSOR/FILE_TYPE/DATE12 written
+    # by save_gdal for a radar-coordinate product) - takes precedence below
+    atr.update(ds.GetMetadata() or {})
 
-    atr['X_STEP'] = x_step
-    atr['Y_STEP'] = y_step
-    atr['X_FIRST'] = x0
-    atr['Y_FIRST'] = y0
+    # geotransform: GDAL returns the default identity transform (0, 1, 0, 0, 0, 1)
+    # for a raster without georeferencing, which used to be silently mistaken for
+    # real coordinates.  can_return_null=True returns None instead.
+    transform = ds.GetGeoTransform(can_return_null=True)
+    proj = ds.GetProjection()
 
-    # projection / coordinate unit
-    srs = osr.SpatialReference(wkt=ds.GetProjection())
-    atr['EPSG'] = srs.GetAttrValue('AUTHORITY', 1)
-    srs_name = srs.GetName()
-    if srs_name and 'UTM' in srs_name:
-        atr['UTM_ZONE'] = srs_name.split('UTM zone')[-1].strip()
-        atr['X_UNIT'] = 'meters'
-        atr['Y_UNIT'] = 'meters'
+    if transform is None:
+        # radar / pixel coordinate: write NO geo keys at all
+        atr['X_UNIT'] = 'pixel'
+        atr['Y_UNIT'] = 'pixel'
 
-    elif abs(x_step) < 1. and abs(x_step) > 1e-7:
-        atr['X_UNIT'] = 'degrees'
-        atr['Y_UNIT'] = 'degrees'
-        # constrain longitude within (-180, 180]
-        if atr['X_FIRST'] > 180.:
-            atr['X_FIRST'] -= 360.
+    else:
+        x0 = transform[0]
+        y0 = transform[3]
+        x_step = abs(transform[1])
+        y_step = abs(transform[5]) * -1.
+
+        atr['X_STEP'] = x_step
+        atr['Y_STEP'] = y_step
+        atr['X_FIRST'] = x0
+        atr['Y_FIRST'] = y0
+
+        # projection / coordinate unit
+        srs = osr.SpatialReference(wkt=proj) if proj else osr.SpatialReference()
+        epsg = srs.GetAttrValue('AUTHORITY', 1) if proj else None
+        if epsg:
+            atr['EPSG'] = epsg
+        srs_name = srs.GetName() if proj else None
+        if srs_name and 'UTM' in srs_name:
+            atr['UTM_ZONE'] = srs_name.split('UTM zone')[-1].strip()
+            atr['X_UNIT'] = 'meters'
+            atr['Y_UNIT'] = 'meters'
+
+        elif abs(x_step) < 1. and abs(x_step) > 1e-7:
+            atr['X_UNIT'] = 'degrees'
+            atr['Y_UNIT'] = 'degrees'
+            # constrain longitude within (-180, 180]
+            if atr['X_FIRST'] > 180.:
+                atr['X_FIRST'] -= 360.
+
+        else:
+            atr['X_UNIT'] = 'meters'
+            atr['Y_UNIT'] = 'meters'
 
     # no data value
     atr['NoDataValue'] = ds.GetRasterBand(1).GetNoDataValue()
