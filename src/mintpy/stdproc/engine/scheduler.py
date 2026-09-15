@@ -153,7 +153,9 @@ def _log_run_summary(t0: float, failed: bool) -> None:
             "  per tool (actual processing time; tasks run in parallel, so "
             "the sum can exceed wall time):")
         lines.append("    " + ", ".join(parts))
-    logger.info("\n%s", "\n".join(lines))
+    # one log record per line, so every line carries the standard prefix
+    for line in lines:
+        logger.info("%s", line)
 
 
 def _select_gpu(dev: int) -> None:

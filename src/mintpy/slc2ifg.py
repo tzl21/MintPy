@@ -33,6 +33,8 @@ import sys
 
 from mintpy.utils import readfile
 
+logger = logging.getLogger(__name__)
+
 
 def read_slc2ifg_template(cfg_file):
     """Read the slc2ifg default template (merges with the user config file)."""
@@ -82,7 +84,7 @@ def run_slc2ifg(cfg_file=None, template=None, overrides=None):
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     executor = get_executor(cfg)
-    print(f'run slc2ifg with the {type(executor).__name__} ...')
+    logger.info('run slc2ifg with the %s ...', type(executor).__name__)
     executor.run(cfg)
     return
 
