@@ -38,7 +38,7 @@ def _isce2_psfilt(img, alpha=0.5, n=32):
 
 def test_coherence_kernel_triangular_matches_isce2():
     """coherence_kernel('triangular') == ISCE2 Bartlett outer product."""
-    from mintpy.stdproc.generate_coh_complex import coherence_kernel
+    from mintpy.stdproc.generate_coh import coherence_kernel
 
     for n in (5, 7, 9):
         k = coherence_kernel(n, 'triangular')
@@ -50,14 +50,14 @@ def test_coherence_kernel_triangular_matches_isce2():
 
 
 def test_coherence_kernel_uniform_is_boxcar():
-    from mintpy.stdproc.generate_coh_complex import coherence_kernel
+    from mintpy.stdproc.generate_coh import coherence_kernel
 
     k = coherence_kernel(5, 'uniform')
     assert np.allclose(k, np.full((5, 5), 1.0 / 25.0))
 
 
 def test_coherence_estimator_default_is_triangular():
-    from mintpy.stdproc.generate_coh_complex import CoherenceEstimator
+    from mintpy.stdproc.generate_coh import CoherenceEstimator
 
     est = CoherenceEstimator({'window_size': 5})
     assert est.window_type == 'triangular'

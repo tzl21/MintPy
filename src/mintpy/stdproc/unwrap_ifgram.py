@@ -27,13 +27,11 @@ Examples:
 """
 
 import re
-import argparse
 import logging
 import os
 import shutil
 import subprocess
 import threading
-import sys
 import tempfile
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,7 +50,6 @@ from .utils.naming import (
     variant_of,
 )
 from .utils.slc2ifg_utils import (
-    create_xml_for_binary,
     tqdm_progress,
 )
 
@@ -268,14 +265,6 @@ UNW_SUFFIX_ISCE2 = ".unw"
 CONNCOMP_SUFFIX_ISCE2 = ".unw.conncomp"
 
 
-def setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-
-
 def find_snaphu_binary() -> str:
     """Find the snaphu executable.
 
@@ -297,108 +286,6 @@ def find_snaphu_binary() -> str:
 # ------------------------------------------------------------------------
 # Argument parsing
 # ------------------------------------------------------------------------
-def parse_arguments(args_list: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Phase unwrapping via SNAPHU binary with full parameter control.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # ISCE3 (GeoTIFF)
-  %(prog)s --processor isce3 --ifg-dir ./ifgs --cor-dir ./cors \\
-      --nlooks 20.0 --max-workers 4
-
-  # ISCE2 (ENVI) deformation mode with custom DEFOMAX
-  %(prog)s --processor isce2 --ifg-dir ./ifgs --cor-dir ./cors \\
-      --ifg-pattern *.int --cor-pattern *.phsig.coh --cost-mode defo \\
-      --defo-max-cycles 2.0 --nlooks 16.0 --ntiles 2 2 --max-workers 8
-        """,
-    )
-
-    # ---- Processor ----
-    parser.add_argument("--processor", type=str, choices=["isce2", "isce3"],
-                        required=True,
-                        help="Processor type")
-
-    # ---- I/O ----
-    parser.add_argument("--ifg-dir", type=Path, required=True)
-    parser.add_argument("--cor-dir", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("./unwrapped_output"))
-    parser.add_argument("--ifg-pattern", type=str)
-    parser.add_argument("--cor-pattern", type=str)
-
-    # ---- SNAPHU core ----
-    parser.add_argument("--nlooks", type=float, default=5.0)
-    parser.add_argument("--cost-mode", choices=["topo", "defo", "smooth"],
-                        default=_DEFAULT_COST_MODE)
-    parser.add_argument("--init-method", choices=["mst", "mcf"],
-                        default=_DEFAULT_INIT_METHOD)
-
-    # ---- Deformation-mode params ----
-    parser.add_argument("--defo-max-cycles", type=float,
-                        default=_DEFAULT_DEFO_MAX_CYCLES,
-                        help=f"DEFOMAX_CYCLE (default: {_DEFAULT_DEFO_MAX_CYCLES})")
-    parser.add_argument("--defo-thresh-factor", type=float,
-                        default=_DEFAULT_DEFO_THRESH_FACTOR,
-                        help=f"DEFOTHRESHFACTOR (default: {_DEFAULT_DEFO_THRESH_FACTOR})")
-    parser.add_argument("--defo-lay-const", type=float,
-                        default=_DEFAULT_DEFO_LAY_CONST,
-                        help=f"DEFOCONST for defo mode (default: {_DEFAULT_DEFO_LAY_CONST})")
-    parser.add_argument("--lambda", type=float, dest="wavelength",
-                        default=_DEFAULT_LAMBDA,
-                        help=f"Radar wavelength in meters (default: {_DEFAULT_LAMBDA})")
-    parser.add_argument("--snaphu-binary", type=str, default=None,
-                        help="Path to snaphu executable (auto-detected if not set)")
-
-    # ---- Tiling ----
-    parser.add_argument("--ntiles", type=int, nargs=2, default=[1, 1],
-                        metavar=("ROW", "COL"))
-    parser.add_argument("--tile-overlap", type=int, default=0)
-    parser.add_argument("--nproc", type=int, default=1,
-                        help="Processors per snaphu call (default: 1)")
-    parser.add_argument("--tile-cost-thresh", type=int,
-                        default=_DEFAULT_TILE_COST_THRESH)
-    parser.add_argument("--min-region-size", type=int,
-                        default=_DEFAULT_MIN_REGION_SIZE)
-
-    # ---- Connected components ----
-    parser.add_argument("--min-conncomp-frac", type=float,
-                        default=_DEFAULT_MIN_CONNCOMP_FRAC)
-    parser.add_argument("--conncomp-thresh", type=float,
-                        default=_DEFAULT_CONNCOMP_THRESH)
-    parser.add_argument("--max-ncomps", type=int, default=_DEFAULT_MAX_NCOMPS)
-    parser.add_argument("--no-conncomp-out", action="store_true",
-                        help="Do NOT write connected component file")
-
-    # ---- Phase gradient window ----
-    parser.add_argument("--phase-grad-window", type=int, nargs=2,
-                        default=list(_DEFAULT_PHASE_GRAD_WINDOW),
-                        metavar=("PSI", "DPSI"))
-
-    # ---- Optional files ----
-    parser.add_argument("--mask-file", type=Path)
-    parser.add_argument("--init-phase", type=Path)
-    parser.add_argument("--scratch-dir", type=Path)
-    parser.add_argument("--keep-scratch", action="store_true",
-                        help="Keep scratch directory after processing")
-
-    # ---- Parallelism ----
-    parser.add_argument("--max-workers", type=int, default=None)
-
-    # ---- Other ----
-    parser.add_argument("-v", "--verbose", action="store_true")
-
-    args, _ = parser.parse_known_args(args_list) if args_list is not None \
-        else (parser.parse_args(), None)
-
-    if args.ifg_pattern is None:
-        args.ifg_pattern = "**/*.int.tif" if args.processor == "isce3" else "**/*.int"
-    if args.cor_pattern is None:
-        args.cor_pattern = "**/*.phsig.coh.tif" if args.processor == "isce3" else "**/*.phsig.coh"
-
-    args.ntiles = tuple(args.ntiles)
-    args.phase_grad_window = tuple(args.phase_grad_window)
-
-    return args
 
 
 # ------------------------------------------------------------------------
@@ -736,8 +623,9 @@ def _unwrap_single(
         ifg_data = ifg_data.astype(np.complex64)
     rows, cols = ifg_data.shape
     # Cache metadata to avoid redundant GDAL re-opens in output writers
-    _ref_gt = ifg_ds.GetGeoTransform()
-    _ref_proj = ifg_ds.GetProjection()
+    from . import io as sio
+    _ref_gt = sio.get_geotransform(ifg_ds)
+    _ref_proj = ifg_ds.GetProjection() if _ref_gt is not None else ''
     ifg_ds = None
 
     if cor_path is not None:
@@ -828,23 +716,13 @@ def _unwrap_single(
             if conncomp_array is not None:
                 conncomp_array[mask_zeros] = 0
 
-        # Write outputs
-        if processor == "isce2":
-            _write_envi_output(unw_path_out, unw_array, rows, cols, _ref_gt, _ref_proj,
-                               nodata=0.0, dtype=np.float32)
-            create_xml_for_binary(unw_path_out, family="intimage",
-                                  description="Unwrapped interferogram phase")
-
-            if conncomp_out and conncomp_array is not None:
-                _write_envi_output(conn_path_out, conncomp_array, rows, cols, _ref_gt, _ref_proj,
-                                   nodata=0, dtype=np.uint16)
-                create_xml_for_binary(conn_path_out, family="image",
-                                      description="Connected components")
-        else:
-            _write_geotiff_output(unw_path_out, unw_array, rows, cols, _ref_gt, _ref_proj, nodata=0.0)
-            if conncomp_out and conncomp_array is not None:
-                _write_geotiff_output(conn_path_out, conncomp_array, rows, cols, _ref_gt, _ref_proj,
-                                      nodata=0, dtype=gdal.GDT_UInt16)
+        # Write outputs: a GeoTIFF for both processors (isce2 radar products
+        # carry no georeferencing); conncomp stays uint32 (no truncation)
+        _write_output(unw_path_out, unw_array, processor, _ref_gt, _ref_proj,
+                      nodata=0.0, np_dtype=np.float32, file_type='.unw')
+        if conncomp_out and conncomp_array is not None:
+            _write_output(conn_path_out, conncomp_array, processor, _ref_gt, _ref_proj,
+                          nodata=0, np_dtype=np.uint32, file_type='.unw.conncomp')
 
     finally:
         if not keep_scratch:
@@ -853,87 +731,32 @@ def _unwrap_single(
     return unw_path_out, conn_path_out
 
 
-def _write_envi_output(
-    output_path: Path, array: np.ndarray,
-    rows: int, cols: int, gt: tuple, proj: str,
-    nodata: float = 0.0, dtype: np.dtype = np.float32,
+def _write_output(
+    output_path: Path, array: np.ndarray, processor: str,
+    gt: Optional[tuple], proj: str,
+    nodata: float = 0.0, np_dtype: np.dtype = np.float32,
+    file_type: str = '.unw',
 ) -> None:
+    """Write an unwrapped-phase / connected-component product as a GeoTIFF.
 
-    if array.shape != (rows, cols):
-        raise ValueError(f"Array shape {array.shape} != ({rows}, {cols})")
+    Both processors share the GeoTIFF container; isce2 radar-coordinate
+    products are written WITHOUT any georeferencing.  The write is atomic.
+    """
+    from . import io as sio
 
-    gdal_dtype = gdal.GDT_Float32 if np.issubdtype(dtype, np.floating) else gdal.GDT_UInt16
-    driver = gdal.GetDriverByName("ENVI")
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: create at a temp path, rename only after a successful
-    # close — an interrupted run leaves no partial product at `output_path`.
-    tmp = f"{output_path}.tmp"
-    try:
-        ds_out = driver.Create(tmp, cols, rows, 1, gdal_dtype)
-        if ds_out is None:
-            raise RuntimeError(f"Failed to create {output_path}")
-        if gt is not None:
-            ds_out.SetGeoTransform(gt)
-        if proj:
-            ds_out.SetProjection(proj)
-        band = ds_out.GetRasterBand(1)
-        band.WriteArray(array)
-        if np.isfinite(nodata):
-            band.SetNoDataValue(nodata)
-        band.FlushCache()
-        ds_out = None
-        os.replace(tmp, str(output_path))
-    except BaseException:
-        try:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    meta = {'FILE_TYPE': file_type}
+    epsg = sio.epsg_from_projection(proj) if proj else None
+    geo = False
+    if processor != 'isce2' and gt is not None and epsg:
+        meta.update({
+            'X_FIRST': gt[0], 'Y_FIRST': gt[3],
+            'X_STEP': abs(gt[1]), 'Y_STEP': gt[5], 'EPSG': epsg,
+        })
+        geo = True
 
-
-def _write_geotiff_output(
-    output_path: Path, array: np.ndarray,
-    rows: int, cols: int, gt: tuple, proj: str,
-    nodata: float = 0.0, dtype: Optional[int] = None,
-) -> None:
-
-    if array.shape != (rows, cols):
-        raise ValueError(f"Array shape {array.shape} != ({rows}, {cols})")
-
-    if dtype is None:
-        gdal_dtype = gdal.GDT_Float32
-    else:
-        gdal_dtype = dtype
-    driver = gdal.GetDriverByName("GTiff")
-    opts = ["COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"]
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: create at a temp path, rename only after a successful
-    # close — an interrupted run leaves no partial product at `output_path`.
-    tmp = f"{output_path}.tmp"
-    try:
-        ds_out = driver.Create(tmp, cols, rows, 1, gdal_dtype, opts)
-        if ds_out is None:
-            raise RuntimeError(f"Failed to create {output_path}")
-        ds_out.SetGeoTransform(gt)
-        if proj:
-            ds_out.SetProjection(proj)
-        band = ds_out.GetRasterBand(1)
-        band.WriteArray(array)
-        if np.isfinite(nodata):
-            band.SetNoDataValue(nodata)
-        band.FlushCache()
-        ds_out = None
-        os.replace(tmp, str(output_path))
-    except BaseException:
-        try:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    sio.write_product(
+        np.asarray(array, dtype=np_dtype), output_path, processor=processor,
+        meta=meta, geo=geo, nodata=nodata, compress='LZW', tiled=True)
 
 
 # ------------------------------------------------------------------------
@@ -1075,74 +898,5 @@ def find_matching_files(
 # ------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------
-def main(args: Optional[argparse.Namespace] = None) -> int:
-    if args is None:
-        args = parse_arguments()
-
-    setup_logging(args.verbose)
-
-    try:
-        if not args.ifg_dir.exists():
-            raise FileNotFoundError(f"ifg-dir not found: {args.ifg_dir}")
-        if not args.cor_dir.exists():
-            raise FileNotFoundError(f"cor-dir not found: {args.cor_dir}")
-
-        ifg_files, cor_files = find_matching_files(
-            args.ifg_dir, args.cor_dir,
-            args.ifg_pattern, args.cor_pattern, args.processor,
-        )
-
-        logger.info("Found %d interferogram/correlation pairs", len(ifg_files))
-        logger.info("Cost mode: %s, Init: %s, Nlooks: %s",
-                     args.cost_mode, args.init_method, args.nlooks)
-        logger.info("DEFOMAX: %.2f cycles, Ntiles: %s, Nproc: %s",
-                     args.defo_max_cycles, args.ntiles, args.nproc)
-
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-
-        unwrapped, conncomps = unwrap_batch(
-            ifg_paths=ifg_files, cor_paths=cor_files,
-            nlooks=args.nlooks, output_dir=args.output_dir,
-            processor=args.processor,
-            max_workers=args.max_workers if args.max_workers else 1,
-            snaphu_bin=getattr(args, "snaphu_binary", None),
-            cost_mode=args.cost_mode,
-            init_method=args.init_method,
-            mask_paths=[args.mask_file] * len(ifg_files) if args.mask_file else None,
-            init_phase_paths=([args.init_phase] * len(ifg_files)
-                              if args.init_phase else None),
-            ntiles=args.ntiles, tile_overlap=args.tile_overlap,
-            nproc=args.nproc,
-            tile_cost_thresh=args.tile_cost_thresh,
-            min_region_size=args.min_region_size,
-            min_conncomp_frac=args.min_conncomp_frac,
-            conncomp_thresh=args.conncomp_thresh,
-            max_ncomps=args.max_ncomps,
-            phase_grad_window=args.phase_grad_window,
-            defo_max_cycles=args.defo_max_cycles,
-            defo_thresh_factor=args.defo_thresh_factor,
-            defo_lay_const=args.defo_lay_const,
-            wavelength=args.wavelength,
-            conncomp_out=not args.no_conncomp_out,
-            keep_scratch=args.keep_scratch,
-        )
-
-        logger.info("Generated %d unwrapped interferograms", len(unwrapped))
-        logger.info("Generated %d connected component files",
-                     sum(1 for c in conncomps if c is not None))
-
-        return 0
-
-    except FileNotFoundError as e:
-        logger.error("File error: %s", e)
-        return 1
-    except ValueError as e:
-        logger.error("Configuration error: %s", e)
-        return 1
-    except Exception as e:
-        logger.error("Unwrapping failed: %s", e)
-        return 2
 
 
-if __name__ == "__main__":
-    sys.exit(main())

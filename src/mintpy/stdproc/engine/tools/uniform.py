@@ -29,8 +29,8 @@ from mintpy.stdproc.engine.tool import (
 #: complex_coh / phsig_coh share the slc2ifg.generate_coh.* config section
 _GENERATE_COH_PARAMS = [
     ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.generate_coh.slc_pattern'),
-    ParamSpec('subdataset', cfg='slc2ifg.generate_coh.subdataset',
+                  legacy_cfg='slc2ifg.slc_pattern'),
+    ParamSpec('subdataset', cfg='slc2ifg.subdataset',
               default='/data/VV'),
     ParamSpec('window_size', cfg='slc2ifg.generate_coh.cc_window_size',
               kind='int', default=5),
@@ -177,28 +177,47 @@ class PhsigCohTool(Tool):
 
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        if tile_size > 0:
+        keep_sigma = bool(ctx.param('keep_sigma', False))
+        if tile_size > 0 and not keep_sigma:
             self._run_tiled(ctx, out, tile_size, use_gpu, ps_win, grad_win, nlks)
         else:
+            if tile_size > 0:
+                ctx.logger.info(
+                    "phsig_coh: keep_sigma is on -> using the whole-image "
+                    "estimator (the tiled path does not emit sigma)")
             self._run_whole(ctx, out, use_gpu, ps_win, grad_win, nlks)
         return {'coh': out}
 
     # ------------------------------------------------------------------
     def _run_whole(self, ctx, out, use_gpu, ps_win, grad_win, nlks) -> None:
+        from pathlib import Path
+
         from mintpy.stdproc.engine.gpu_kernels import estimate_phsig_block
-        from mintpy.stdproc.generate_coh_phsig import (
-            _write_band,
+        from mintpy.stdproc.generate_coh import (
+            estimate_phsig_correlation,
             read_complex_image,
+            write_coherence_image,
         )
-        from mintpy.stdproc.utils.slc2ifg_utils import create_xml_for_binary
 
         processor = ctx.param('processor')
+        keep_sigma = bool(ctx.param('keep_sigma', False))
         ifg, meta = read_complex_image(str(ctx.input('ifg')), processor)
-        coh = estimate_phsig_block(ifg, ps_win, grad_win, nlks, gpu=use_gpu)
-        _write_band(str(out), coh, meta, processor, 'phase-sigma correlation')
-        if processor == 'isce2':
-            create_xml_for_binary(out, family='image',
-                                  description='Phase-sigma correlation')
+
+        sigma = None
+        if keep_sigma:
+            # the sigma raster needs the phase variance, which only the CPU
+            # estimator returns; use it for both products (no double work)
+            coh, sigma = estimate_phsig_correlation(
+                ifg, ps_win, grad_win, nlks, return_sigma=True)
+        else:
+            coh = estimate_phsig_block(ifg, ps_win, grad_win, nlks, gpu=use_gpu)
+
+        write_coherence_image(str(out), coh, meta, processor,
+                              'phase-sigma correlation')
+        if keep_sigma:
+            sig = Path(str(out).replace('.phsig.coh.tif', '.phsig.sigma.tif'))
+            write_coherence_image(str(sig), sigma, meta, processor,
+                                  'phase standard deviation')
 
     def _run_tiled(self, ctx, out, tile_size, use_gpu, ps_win, grad_win,
                    nlks) -> None:
@@ -206,7 +225,6 @@ class PhsigCohTool(Tool):
 
         from mintpy.stdproc.engine.gpu_kernels import estimate_phsig_block
         from mintpy.stdproc.engine.tiling import compute_tiled_file
-        from mintpy.stdproc.utils.slc2ifg_utils import create_xml_for_binary
 
         processor = ctx.param('processor')
         ps_half = ps_win // 2
@@ -232,6 +250,3 @@ class PhsigCohTool(Tool):
         )
         ctx.logger.info("phsig_coh (tiled %d, gpu=%s): %s %s",
                         tile_size, use_gpu, _tag(out), ctx.elapsed_str())
-        if processor == 'isce2':
-            create_xml_for_binary(out, family='image',
-                                  description='Phase-sigma correlation')

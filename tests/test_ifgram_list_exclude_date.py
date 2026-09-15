@@ -114,17 +114,16 @@ def test_generate_pairs_select_exclude():
 # CLI
 # ------------------------------------------------------------------------
 def test_ifgram_list_cli_exclude_date(tmp_path):
-    from mintpy.stdproc import ifgram_list
+    from mintpy.cli import ifgram_list
     slc_dir = tmp_path / 'slc'
     slc_dir.mkdir()
     for d in DATES:
         (slc_dir / d).mkdir()
     out = tmp_path / 'ifg'
-    args = ifgram_list.parse_arguments([
+    rc = ifgram_list.main([
         '--slc', str(slc_dir), '--outdir', str(out), '--mode', 'sequential',
         '-n', '3', '--exclude-date', '20230129', '--exclude-date', '20230411',
     ])
-    rc = ifgram_list.main(args)
     assert rc == 0
     pairs = _read_pairs(out / 'ifgram_list.txt')
     flat = [d for p in pairs for d in p]

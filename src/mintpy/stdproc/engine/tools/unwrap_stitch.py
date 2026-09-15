@@ -38,7 +38,7 @@ class UnwrapTool(Tool):
         #: auto = phsig if the phsig_coh stage is enabled, else complex if
         #: complex_coh is enabled (fullres only), else none; none = SNAPHU
         #: runs with weight 1 (uniform, no coherence file).  'external' is
-        #: set by the engine when slc2ifg.unwrap.coh_dir/coh_pattern supply
+        #: set by the engine when slc2ifg.coh_dir/coh_pattern supply
         #: the coherence raster (the file is passed via the 'coh' input port).
         ParamSpec('coh_type', cfg='slc2ifg.unwrap.coh_type', default='auto'),
         ParamSpec('cost_mode', cfg='slc2ifg.unwrap.snaphu.cost_mode',
@@ -52,8 +52,8 @@ class UnwrapTool(Tool):
         ParamSpec('keep_scratch', cfg='slc2ifg.unwrap.snaphu.keep_scratch',
                   legacy_cfg='slc2ifg.unwrap.keep_scratch',
                   kind='bool', default=False),
-        ParamSpec('mask_file', cfg='slc2ifg.unwrap.snaphu.mask_file',
-                  legacy_cfg='slc2ifg.unwrap.mask_file'),
+        ParamSpec('mask_file', cfg='slc2ifg.mask',
+                  ),
         # Unwrap algorithm switch: snaphu (built-in) | phass | icu (requires
         # third-party packages; skeleton)
     ]

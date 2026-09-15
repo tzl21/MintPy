@@ -22,7 +22,6 @@ STEP_LIST4OFFSET = [
 ]
 
 STEP_LIST = [
-    'slc2ifg',
     'load_data',
     'modify_network',
     'reference_point',

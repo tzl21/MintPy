@@ -23,7 +23,6 @@ import argparse
 import concurrent.futures
 import logging
 import re
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,41 +34,7 @@ from .utils.stitching_utils import stitch_arrays, _write_geotiff
 
 gdal.UseExceptions()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
-
-
-def parse_arguments(args_list: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Stitch per-burst interferograms and coherence maps."
-    )
-    parser.add_argument('--processor', type=str, choices=['isce2', 'isce3'],
-                        required=True, help="Processor type")
-    parser.add_argument('--burst-dir', type=str, required=True, nargs='+',
-                        help="Root directories containing per-burst results")
-    parser.add_argument('--output-dir', type=str, required=True,
-                        help="Output directory for stitched products")
-    parser.add_argument('--file-types', type=str, nargs='+',
-                        default=['.int.tif', '.cpx.coh.tif'],
-                        help="File extensions to stitch")
-    parser.add_argument('--out-bounds', type=float, nargs=4,
-                        metavar=('WEST', 'SOUTH', 'EAST', 'NORTH'), default=None,
-                        help="Final crop bounds in EPSG:4326. "
-                             "If not set, the full union extent of all bursts is stitched.")
-    parser.add_argument('--output-prefix', type=str, default='',
-                        help="Prefix for output subdirectories")
-    parser.add_argument('--max-workers', type=int, default=1,
-                        help="Number of parallel stitch workers")
-    parser.add_argument('--overwrite', action='store_true',
-                        help="Overwrite existing output files")
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help="Verbose output")
-    if args_list is None:
-        return parser.parse_args()
-    return parser.parse_args(args_list)
 
 
 def discover_burst_dirs(root_dir: Path) -> List[Path]:
@@ -222,11 +187,3 @@ def stitch_all(args: argparse.Namespace) -> int:
     return 0 if total_failed == 0 else 1
 
 
-def main(args: Optional[argparse.Namespace] = None) -> int:
-    if args is None:
-        args = parse_arguments()
-    return stitch_all(args)
-
-
-if __name__ == '__main__':
-    sys.exit(main())

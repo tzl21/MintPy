@@ -27,30 +27,28 @@ Examples:
         --slc-pattern *.slc --ifg-pattern *.int
 """
 
-import argparse
 import glob
 import logging
 import os
-import sys
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
-from dolphin.interferogram import VRTInterferogram
 from osgeo import gdal
 
-from .utils.naming import (
-    ifg_path,
-    slc_pattern,
-)
-from .utils.slc2ifg_utils import create_xml_for_binary, is_hdf5_file
+from .utils.naming import ifg_path
+from .utils.slc2ifg_utils import is_hdf5_file
+from .utils.vrt_utils import VRTInterferogram
 
 gdal.UseExceptions()
+
+#: GTiff creation options for materialised products
+DEFAULT_TIFF_OPTIONS = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER']
 
 # ------------------------------------------------------------------------
 # Logging
 # ------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 #: Rows processed at a time when materialising a VRT (bounds peak memory)
@@ -70,40 +68,50 @@ def expand_directories(directory_patterns):
 
 def find_slc_file_by_date(slc_dirs, target_date, slc_pattern, processor):
     """
-    Find SLC file that contains the target date in its filename.
+    Find the SLC file matching ``target_date``.
 
-    Also warns if the file extension doesn't fit the processor.
+    ``slc_pattern`` may be a single glob or a sequence of globs (tried in
+    order), so a directory holding either the raw inputs or the pipeline's own
+    ``*.slc.tif`` products can be searched with one call.
     """
-    expected_exts = ['.slc', '.rdr', '.full'] if processor == 'isce2' else ['.tif', '.tiff', '.h5', '.hdf5']
+    patterns = (slc_pattern,) if isinstance(slc_pattern, str) else tuple(slc_pattern)
+    expected_exts = (['.slc', '.rdr', '.full', '.tif', '.tiff'] if processor == 'isce2'
+                     else ['.tif', '.tiff', '.h5', '.hdf5'])
     for slc_dir in slc_dirs:
-        pattern = f"*{target_date}{slc_pattern}"
-        matching_files = sorted(
-            list(slc_dir.glob(pattern)) + list(slc_dir.glob(f"*/{pattern}")))
-        if matching_files:
-            if len(matching_files) > 1:
-                logger.warning(
-                    "Multiple SLC candidates for date %s: %s — using %s",
-                    target_date,
-                    [f.name for f in matching_files],
-                    matching_files[0].name)
-            found = matching_files[0]
-            ext = found.suffix.lower()
-            if ext not in expected_exts:
-                logger.warning(
-                    "Processor '%s' expects extensions %s, but found '%s' (%s).",
-                    processor, expected_exts, ext, found.name
-                )
-            return found
+        for pat in patterns:
+            glob_pat = f"*{target_date}{pat}"
+            matching_files = sorted(
+                list(slc_dir.glob(glob_pat)) + list(slc_dir.glob(f"*/{glob_pat}")))
+            if matching_files:
+                if len(matching_files) > 1:
+                    logger.warning(
+                        "Multiple SLC candidates for date %s: %s — using %s",
+                        target_date,
+                        [f.name for f in matching_files],
+                        matching_files[0].name)
+                found = matching_files[0]
+                ext = found.suffix.lower()
+                if ext not in expected_exts:
+                    logger.warning(
+                        "Processor '%s' expects extensions %s, but found '%s' (%s).",
+                        processor, expected_exts, ext, found.name
+                    )
+                return found
     return None
 
 
 def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: str,
                                   window: tuple = None) -> bool:
-    """Materialise the VRT to a CFloat32 raster, atomically.
+    """Materialise the VRT to a CFloat32 GeoTIFF, atomically.
+
+    The product is always a GeoTIFF for both processors: isce2 radar products
+    carry no georeferencing, isce3 products keep the VRT's geotransform.
+    Product metadata (PROCESSOR/FILE_TYPE/DATE12) is embedded in the file, so no
+    ISCE2 ``.xml`` / ENVI ``.hdr`` sidecar is needed.
 
     The product is written to ``<output>.tmp`` and renamed into place only
     after a successful close, so an interrupted run never leaves a partial
-    file at the final path (the ENVI ``.hdr`` sidecar is renamed along).
+    file at the final path.
 
     ``window`` is an optional ``(x0, y0, w, h)`` sub-region of the VRT
     (read-time crop): only that region is read and the output raster covers
@@ -117,8 +125,8 @@ def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: 
         if ref_ds is None:
             logger.error("Cannot open VRT: %s", vrt_path)
             return False
-        geotransform = ref_ds.GetGeoTransform()
-        projection = ref_ds.GetProjection()
+        geotransform = ref_ds.GetGeoTransform(can_return_null=True)
+        projection = ref_ds.GetProjection() if geotransform is not None else ''
         rows, cols = ref_ds.RasterYSize, ref_ds.RasterXSize
         ref_band = ref_ds.GetRasterBand(1)
 
@@ -129,33 +137,47 @@ def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: 
                 raise ValueError(
                     f"window {window} outside VRT extent {cols}x{rows}")
             out_cols, out_rows = w, h
-            # shift the geotransform origin to the window corner
-            geotransform = (
-                geotransform[0] + x0 * geotransform[1] + y0 * geotransform[2],
-                geotransform[1],
-                geotransform[2],
-                geotransform[3] + x0 * geotransform[4] + y0 * geotransform[5],
-                geotransform[4],
-                geotransform[5],
-            )
+            if geotransform is not None:
+                # shift the geotransform origin to the window corner
+                geotransform = (
+                    geotransform[0] + x0 * geotransform[1] + y0 * geotransform[2],
+                    geotransform[1],
+                    geotransform[2],
+                    geotransform[3] + x0 * geotransform[4] + y0 * geotransform[5],
+                    geotransform[4],
+                    geotransform[5],
+                )
 
-        driver_name = 'GTiff' if processor == 'isce3' else 'ENVI'
-        driver = gdal.GetDriverByName(driver_name)
+        driver = gdal.GetDriverByName('GTiff')
         if driver is None:
-            logger.error("GDAL driver %s not available.", driver_name)
+            logger.error("GDAL driver GTiff not available.")
             return False
 
-        options = ['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER'] \
-            if processor == 'isce3' else []
-
         out_ds = driver.Create(
-            str(tmp_path), out_cols, out_rows, 1, gdal.GDT_CFloat32, options=options
+            str(tmp_path), out_cols, out_rows, 1, gdal.GDT_CFloat32,
+            options=list(DEFAULT_TIFF_OPTIONS),
         )
         if out_ds is None:
             logger.error("Cannot create output: %s", output_path)
             return False
-        out_ds.SetGeoTransform(geotransform)
-        out_ds.SetProjection(projection)
+
+        # isce2 radar products carry no georeferencing at all
+        write_geo = geotransform is not None and processor != 'isce2'
+        if write_geo:
+            out_ds.SetGeoTransform(geotransform)
+            if projection:
+                out_ds.SetProjection(projection)
+
+        match = re.search(r'(\d{8})[_-](\d{8})', str(output_path))
+        for key, value in (
+            ('FILE_TYPE', '.int'),
+            ('PROCESSOR', 'isce3' if processor == 'isce3' else 'gdal'),
+            ('DATE12', f"{match.group(1)[2:]}-{match.group(2)[2:]}" if match else None),
+            ('SLC2IFG_PROCESSOR', 'isce2' if processor == 'isce2' else None),
+        ):
+            if value is not None:
+                out_ds.SetMetadataItem(key, value)
+
         out_band = out_ds.GetRasterBand(1)
 
         if window is not None:
@@ -178,15 +200,11 @@ def create_interferogram_from_vrt(vrt_path: Path, output_path: Path, processor: 
         ref_band = None
         ref_ds = None
 
-        # atomic rename: data file + ENVI .hdr sidecar
         tmp_path.replace(output_path)
+        # clean up any stray ENVI sidecar from a previous run
         hdr_tmp = Path(str(tmp_path) + '.hdr')
         if hdr_tmp.exists():
-            hdr_tmp.replace(Path(str(output_path) + '.hdr'))
-
-        if processor == 'isce2':
-            create_xml_for_binary(output_path, family='intimage',
-                                  description='Complex interferogram')
+            hdr_tmp.unlink()
         return True
 
     except Exception as e:
@@ -383,8 +401,8 @@ def generate_ifgram(pairs_file, slc_dir_patterns, output_dir, processor,
             # SLC grid (None when no bbox requested)
             window = None
             if bbox and slc1 is not None:
-                from mintpy.stdproc.crop_slc_geo import bbox_to_window
-                window = bbox_to_window(slc1, bbox, subdataset, bbox_buffer)
+                from mintpy.stdproc import io as sio
+                window = sio.bbox_to_window(slc1, bbox, subdataset, bbox_buffer)
                 if window is None:
                     raise ValueError(
                         f"bbox {bbox} does not intersect SLC {slc1} "
@@ -431,81 +449,5 @@ def generate_ifgram(pairs_file, slc_dir_patterns, output_dir, processor,
 # ------------------------------------------------------------------------
 # Command‑line interface
 # ------------------------------------------------------------------------
-def parse_arguments(args_list=None):
-    """Parse command line arguments (compatible with engine invocation)."""
-    parser = argparse.ArgumentParser(
-        description="Generate VRT interferograms and (optionally) materialise them.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # ISCE3: VRT + GeoTIFF output
-  %(prog)s --processor isce3 --pairs-file ifgram_list.txt \\
-        --slc-dir /data/slc --output-dir /data/ifgs
-
-  # ISCE2: VRT + ENVI int output, skip materialisation
-  %(prog)s --processor isce2 --pairs-file pairs.txt \\
-        --slc-dir /data/slc --output-dir /data/ifgs \\
-        --slc-pattern *.slc --ifg-pattern *.int --only-vrt
-        """
-    )
-    parser.add_argument('--processor', required=True, choices=['isce2', 'isce3'],
-                        help="Processor type: 'isce2' or 'isce3'")
-    parser.add_argument('--pairs-file', required=True,
-                        help="Path to interferometric pairs file (e.g., ifgram_list.txt)")
-    parser.add_argument('--slc-dir', nargs='+', required=True,
-                        help="One or more directories containing SLC files (wildcards allowed)")
-    parser.add_argument('--output-dir', required=True,
-                        help="Output directory for interferogram files")
-    parser.add_argument('--slc-pattern', default=None,
-                        help="Pattern for SLC files (e.g., '*.slc.tif', '*.slc'). "
-                             "Default: '*.slc.*' for isce3, '*.slc' for isce2.")
-    parser.add_argument('--subdataset', default="/data/VV",
-                        help="Subdataset to use for HDF5/NetCDF files (default: /data/VV)")
-    parser.add_argument('--no-verify', action='store_true',
-                        help="Skip SLC verification")
-    parser.add_argument('--only-vrt', action='store_true',
-                        help="Only create VRT interferograms, do not materialise them")
-    parser.add_argument('--max-workers', type=int, default=None,
-                        help="Maximum number of parallel workers (default: auto)")
-    parser.add_argument('--bbox', type=float, nargs=4, metavar=('W', 'S', 'E', 'N'),
-                        default=None,
-                        help="Read-time crop: materialise each interferogram "
-                             "only over this WSEN bbox (EPSG:4326, degrees); "
-                             "no cropped SLC files are written")
-    parser.add_argument('--bbox-buffer', type=float, default=0.0,
-                        help="Buffer in degrees around --bbox (default: 0.0)")
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help="Verbose logging")
-    return parser.parse_args(args_list) if args_list else parser.parse_args()
 
 
-def main(args=None):
-    if args is None:
-        args = parse_arguments()
-
-    # Set processor‑dependent defaults
-    if args.slc_pattern is None:
-        args.slc_pattern = slc_pattern(args.processor)
-
-    logger.info("Processor: %s", args.processor)
-    logger.info("SLC pattern: %s", args.slc_pattern)
-
-    ok = generate_ifgram(
-        pairs_file=args.pairs_file,
-        slc_dir_patterns=args.slc_dir,
-        output_dir=args.output_dir,
-        processor=args.processor,
-        slc_pattern=args.slc_pattern,
-        subdataset=args.subdataset,
-        no_verify=args.no_verify,
-        only_vrt=args.only_vrt,
-        max_workers=args.max_workers,
-        verbose=args.verbose,
-        bbox=tuple(args.bbox) if args.bbox else None,
-        bbox_buffer=args.bbox_buffer,
-    )
-    sys.exit(0 if ok else 1)
-
-
-if __name__ == '__main__':
-    main()

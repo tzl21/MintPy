@@ -170,8 +170,8 @@ def _as_bbox(value: object) -> Optional[Tuple[float, float, float, float]]:
         v = value.strip()
         if v.lower() in ('', 'auto', 'none', 'off', '0'):
             return None
-        from .crop_slc_geo import parse_wsen
-        return parse_wsen(v)
+        from . import io as sio
+        return sio.parse_wsen(v)
     vals = tuple(float(x) for x in value)
     if len(vals) != 4:
         raise ValueError(f"bbox must be 4 numbers (W S E N), got {value!r}")
@@ -854,7 +854,7 @@ def quick_coherence_weights(
     """
     from osgeo import gdal  # lazy
 
-    from .generate_coh_complex import find_slc_file_by_date
+    from .generate_coh import find_slc_file_by_date
     from .utils.naming import slc_pattern as default_pattern
 
     gdal.UseExceptions()
@@ -873,11 +873,10 @@ def quick_coherence_weights(
     bbox = _as_bbox(bbox)
     use_bbox = bbox is not None
     bbox_win = None
+    from . import io as sio
     if use_bbox:
-        from .crop_slc_geo import bbox_to_window
-
         try:
-            bbox_win = bbox_to_window(str(f0), bbox, subdataset, bbox_buffer)
+            bbox_win = sio.bbox_to_window(str(f0), bbox, subdataset, bbox_buffer)
         except ValueError as ex:
             logger.warning(
                 "quick coherence: bbox window unavailable for %s (%s); "
@@ -914,7 +913,7 @@ def quick_coherence_weights(
             cache[d] = None
             continue
         if use_bbox:
-            win = bbox_to_window(str(f), bbox, subdataset, bbox_buffer)
+            win = sio.bbox_to_window(str(f), bbox, subdataset, bbox_buffer)
             if win is None:
                 logger.warning("quick coherence: bbox does not intersect %s", f)
                 cache[d] = None

@@ -264,7 +264,6 @@ def filter_rasters(
 
     from .naming import int_ext, is_date_pair_dir, next_variant, variant_of
     from .stitching_utils import load_gdal, write_arr
-    from .slc2ifg_utils import create_xml_for_binary
 
     if output_dir is None:
         output_dir = unw_filenames[0].parent
@@ -323,10 +322,18 @@ def filter_rasters(
             this_mask = this_mask | (cc_data == 0)
 
         from osgeo import gdal
+        from mintpy.stdproc import io as sio
         ds = gdal.Open(str(unw_path))
-        gt = ds.GetGeoTransform()
+        gt = sio.get_geotransform(ds) if ds is not None else None
         ds = None
-        px_spacing = (abs(gt[1]) + abs(gt[5])) / 2.0 if pixel_spacing <= 0 else pixel_spacing
+        if pixel_spacing and pixel_spacing > 0:
+            px_spacing = float(pixel_spacing)
+        elif gt is not None:
+            px_spacing = (abs(gt[1]) + abs(gt[5])) / 2.0
+        else:
+            px_spacing = 30.0
+            logger.warning('no pixel spacing available for %s; assuming 30 m',
+                           unw_path.name)
 
         filtered = long_wavelength_filter(
             unwrapped_phase=unw_data,
@@ -336,19 +343,9 @@ def filter_rasters(
             fill_value=fill_value,
         )
 
-        ext = unw_path.suffix.lower()
-        if ext in ('.int', '.unw', '.coh', '.conncomp'):
-            driver = "ENVI"
-            opts = []
-        else:
-            driver = "GTiff"
-            opts = ["COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"]
-
-        write_arr(filtered, str(unw_path), str(output_name), driver=driver, options=opts)
-
-        if driver == "ENVI":
-            create_xml_for_binary(output_name, family='intimage',
-                                  description=f'Filtered (λ>{wavelength_cutoff}m)')
+        # all slc2ifg products are GeoTIFF for both processors
+        write_arr(filtered, str(unw_path), str(output_name), driver="GTiff",
+                  options=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"])
 
         return output_name
 

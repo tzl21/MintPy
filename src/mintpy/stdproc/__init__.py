@@ -15,11 +15,11 @@ Named imports keep working unchanged::
 import importlib
 
 _LAZY_SUBMODULES = (
-    'crop_slc_geo',
-    'crop_slc_rdr',
+    'crop_slc',
     'filter',
     'generate_coh',
     'generate_ifgram',
+    'io',
     'multilook',
     'stitch',
     'unwrap_ifgram',

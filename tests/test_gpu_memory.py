@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 
 def _install_osgeo_stub():
-    """Minimal osgeo stub so ``generate_coh_phsig`` imports without GDAL."""
+    """Minimal osgeo stub so ``generate_coh`` imports without GDAL."""
     if 'osgeo' in sys.modules:
         return
     gdal = types.ModuleType('osgeo.gdal')
@@ -45,7 +45,7 @@ def _phsig_reference_full_ramp(ifg_arr, ps_win=5, grad_win=5, nlks=1.0):
     from numpy.lib.stride_tricks import sliding_window_view
     from scipy.ndimage import correlate
 
-    from mintpy.stdproc.generate_coh_phsig import _gaussian_kernel
+    from mintpy.stdproc.generate_coh import _gaussian_kernel
 
     rows, cols = ifg_arr.shape
     if ps_win % 2 == 0:
@@ -130,7 +130,7 @@ def test_phsig_batched_ramp_bit_identical():
     import numpy as np
 
     _install_osgeo_stub()
-    from mintpy.stdproc.generate_coh_phsig import estimate_phsig_correlation
+    from mintpy.stdproc.generate_coh import estimate_phsig_correlation
 
     rng = np.random.default_rng(7)
     for shape in ((37, 53), (100, 200), (33, 300)):
@@ -149,7 +149,7 @@ def test_phsig_batch_size_invariant():
     import numpy as np
 
     _install_osgeo_stub()
-    import mintpy.stdproc.generate_coh_phsig as phsig
+    import mintpy.stdproc.generate_coh as phsig
 
     rng = np.random.default_rng(3)
     ifg = (rng.standard_normal((40, 60)) +

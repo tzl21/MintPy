@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import re
-
 from pathlib import Path
 from typing import Dict
 
@@ -42,7 +40,7 @@ class IfgramListTool(Tool):
         ParamSpec('exclude_date', cfg='slc2ifg.ifgram_list.exclude_date'),
         # unified SLC pattern; legacy select.slc_pattern as fallback
         ParamSpec('slc_pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.ifgram_list.select.slc_pattern'),
+                  legacy_cfg='slc2ifg.slc_pattern'),
     ] + [
         ParamSpec(name, cfg=f'slc2ifg.ifgram_list.select.{name}',
                   kind=kind)
@@ -54,15 +52,13 @@ class IfgramListTool(Tool):
             ('weight_source', 'str'),
             ('model_tau_days', 'float'),
             ('model_gamma0', 'float'),
-            ('coh_dir', 'str'),
-            ('coh_kind', 'str'),
-            ('coh_variant', 'str'),
-            ('coh_stat', 'str'),
-            ('coh_usable_threshold', 'float'),
             ('quick_window', 'int'),
             ('quick_nlks', 'int'),
             ('quick_max_pixels', 'int'),
-            ('quick_max_workers', 'int'),
+            ('quick_grid', 'int'),
+            ('quick_block', 'int'),
+            ('quick_stat', 'str'),
+            ('quick_usable_threshold', 'float'),
             ('quick_debias', 'bool'),
             ('min_degree', 'int'),
             ('max_pairs', 'int'),
@@ -71,12 +67,21 @@ class IfgramListTool(Tool):
             ('verify', 'bool'),
         ]
     ] + [
+        # canonical top-level coherence keys, shared with the unwrap weighting
+        # and the network-selection weights (see config_map.LEGACY_ALIASES)
+        ParamSpec(name, cfg=f'slc2ifg.{name}', kind=kind)
+        for name, kind in [
+            ('coh_dir', 'str'),
+            ('coh_kind', 'str'),
+            ('coh_variant', 'str'),
+            ('coh_stat', 'str'),
+            ('coh_usable_threshold', 'float'),
+        ]
+    ] + [
         # unified pipeline AOI (not a select.* key): quick coherence reads
         # only the bbox+buffer window of each SLC instead of the whole scene
-        ParamSpec('bbox', cfg='slc2ifg.bbox',
-                  legacy_cfg='slc2ifg.crop_slc.wsen'),
-        ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer', kind='float',
-                  legacy_cfg='slc2ifg.crop_slc.buffer'),
+        ParamSpec('bbox', cfg='slc2ifg.bbox'),
+        ParamSpec('bbox_buffer', cfg='slc2ifg.bbox_buffer', kind='float'),
         # config keys are select.report / select.dot, param names report_file/dot_file
         ParamSpec('report_file', cfg='slc2ifg.ifgram_list.select.report'),
         ParamSpec('dot_file', cfg='slc2ifg.ifgram_list.select.dot'),
@@ -154,30 +159,28 @@ class CropSlcTool(Tool):
         # AOI keys: slc2ifg.bbox is the single source of truth; the legacy
         # crop_slc.wsen/buffer keys keep working with a deprecation warning.
         ParamSpec('wsen', cfg='slc2ifg.bbox',
-                  legacy_cfg='slc2ifg.crop_slc.wsen'),
+                  legacy_cfg='slc2ifg.bbox'),
         ParamSpec('pattern', cfg='slc2ifg.slc_pattern',
-                  legacy_cfg='slc2ifg.crop_slc.pattern'),
+                  legacy_cfg='slc2ifg.slc_pattern'),
         ParamSpec('buffer', cfg='slc2ifg.bbox_buffer',
-                  legacy_cfg='slc2ifg.crop_slc.buffer', kind='float',
+                  legacy_cfg='slc2ifg.bbox_buffer', kind='float',
                   default=0.0),
-        ParamSpec('geom_dir', cfg='slc2ifg.crop_slc.geom_dir'),
+        ParamSpec('geom_dir', cfg='slc2ifg.geom_dir'),
         ParamSpec('prefix', cfg='slc2ifg.crop_slc.prefix', default=''),
         ParamSpec('by_burst', cfg='slc2ifg.crop_slc.by_burst', kind='bool',
                   default=False),
         # stage-specific alias; engine.no_skip_existing (injected globally)
         # also turns this on
         ParamSpec('crop_no_skip_existing',
-                  cfg='slc2ifg.crop_slc.no_skip_existing', kind='bool',
+                  cfg='engine.no_skip_existing', kind='bool',
                   default=False),
     ]
 
     def run(self, ctx: ToolContext) -> Dict[str, Path]:
 
+        from mintpy.stdproc import io as sio
+        from mintpy.stdproc.crop_slc import crop_slc
         from mintpy.stdproc.utils import naming
-        from mintpy.stdproc.crop_slc_geo import main as geo_main
-        from mintpy.stdproc.crop_slc_geo import parse_arguments as geo_parse
-        from mintpy.stdproc.crop_slc_rdr import main as rdr_main
-        from mintpy.stdproc.crop_slc_rdr import parse_arguments as rdr_parse
 
         processor = ctx.param('processor')
         in_dir = Path(ctx.input('slc_dir'))
@@ -190,48 +193,32 @@ class CropSlcTool(Tool):
 
         wsen = ctx.param('wsen')
         if not wsen:
-            raise ValueError("crop_slc requires slc2ifg.bbox in config (legacy alias: slc2ifg.crop_slc.wsen)")
+            raise ValueError("crop_slc requires slc2ifg.bbox in config (legacy alias: slc2ifg.bbox)")
 
+        kwargs = dict(
+            input_dir=str(in_dir),
+            output_dir=str(out_dir),
+            bbox=sio.parse_wsen(str(wsen)),
+            processor=processor,
+            pattern=ctx.param('pattern') or naming.slc_pattern(processor),
+            buffer=float(ctx.param('buffer', 0.0) or 0.0),
+            prefix=str(ctx.param('prefix', '') or ''),
+            workers=workers,
+            no_skip_existing=bool(
+                ctx.param('no_skip_existing', False)
+                or ctx.param('crop_no_skip_existing', False)),
+            by_burst=bool(ctx.param('by_burst', False)),
+            no_burst_dirs=bool(ctx.inputs.get('no_burst_dirs', False)),
+        )
+        if ctx.param('geom_dir'):
+            kwargs['geom_dir'] = str(ctx.param('geom_dir'))
+        # date-filtered file list provided by the engine takes precedence over
+        # the directory scan
         file_list = ctx.inputs.get('file_list')
         if file_list is not None:
-            # date-filtered file list provided by the engine
-            # (--input-dir is still required by the parser; the file list
-            # takes precedence in crop_slc_geo's discovery)
-            args_list = [
-                '--input-dir', str(in_dir),
-                '--file-list', str(file_list),
-                '--output-dir', str(out_dir),
-                '--wsen'] + [x for x in re.split(r'[\s,]+', str(wsen)) if x.strip()] + [
-                '--buffer', str(ctx.param('buffer', 0.0)),
-                '--prefix', str(ctx.param('prefix', '')),
-                '--max-workers', str(workers),
-            ]
-        else:
-            args_list = [
-                '--input-dir', str(in_dir),
-                '--output-dir', str(out_dir),
-                '--wsen'] + [x for x in re.split(r'[\s,]+', str(wsen)) if x.strip()] + [
-                '--pattern', ctx.param('pattern', naming.slc_pattern(processor)),
-                '--buffer', str(ctx.param('buffer', 0.0)),
-                '--prefix', str(ctx.param('prefix', '')),
-                '--max-workers', str(workers),
-            ]
-        if ctx.param('no_skip_existing', False) \
-                or ctx.param('crop_no_skip_existing', False):
-            args_list.append('--no-skip-existing')
-        if ctx.param('geom_dir'):
-            args_list += ['--geom-dir', str(ctx.param('geom_dir'))]
-        if ctx.param('by_burst', False):
-            args_list.append('--by-burst')
-        if ctx.inputs.get('no_burst_dirs', False):
-            args_list.append('--no-burst-dirs')
+            kwargs['file_list'] = str(file_list)
 
-        if processor == 'isce2':
-            ns = rdr_parse(args_list)
-            ret = rdr_main(ns)
-        else:
-            ns = geo_parse(args_list)
-            ret = geo_main(ns)
+        ret = crop_slc(**kwargs)
         if ret not in (0, None):
             raise RuntimeError(f"crop_slc failed with exit code {ret}")
         return {'slc_dir': out_dir}

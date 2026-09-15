@@ -62,7 +62,7 @@ def _legacy_opt(cfg, new_key: str, legacy_key: str, kind: str,
 
     Used for engine-injected parameters (e.g. ``unwrap.nlooks``) that are not
     declared in a tool's ``params_spec``: reads ``new_key`` (backend-scoped,
-    e.g. ``slc2ifg.unwrap.snaphu.nlooks``) and falls back to ``legacy_key``
+    e.g. ``slc2ifg.nlooks``) and falls back to ``legacy_key``
     with a deprecation warning when the new key is absent.
     """
     from mintpy.stdproc.engine.config import (
@@ -217,7 +217,7 @@ class Engine:
         if not has_crop:
             from mintpy.stdproc.engine.config import get_opt
             bbox_raw = (get_opt(self.config.raw, 'slc2ifg.bbox')
-                        or get_opt(self.config.raw, 'slc2ifg.crop_slc.wsen'))
+                        or get_opt(self.config.raw, 'slc2ifg.bbox'))
             if bbox_raw and self.processor == 'isce2':
                 raise ValueError(
                     "engine: slc2ifg.bbox read-time crop requires geocoded "
@@ -572,7 +572,7 @@ class Engine:
         if start_date or end_date or ex_dates:
             # unified SLC pattern; legacy crop_slc.pattern as fallback
             pattern = (get_opt(cfg, 'slc2ifg.slc_pattern')
-                       or get_opt(cfg, 'slc2ifg.crop_slc.pattern')
+                       or get_opt(cfg, 'slc2ifg.slc_pattern')
                        or _naming.slc_pattern(self.processor))
             candidates = sorted(self.slc_input.glob(f"**/{pattern}"))
             keep = []
@@ -755,7 +755,7 @@ class Engine:
                 # unified pipeline key; legacy select.slc_pattern as fallback
                 key = ('slc2ifg.slc_pattern'
                        if has_real_value(cfg, 'slc2ifg.slc_pattern')
-                       else 'slc2ifg.ifgram_list.select.slc_pattern')
+                       else 'slc2ifg.slc_pattern')
             else:
                 key = f'slc2ifg.ifgram_list.select.{name}'
             val = readers[kind](cfg, key, fallback=None)
@@ -765,12 +765,12 @@ class Engine:
         # coherence uses it to read ONLY the AOI window of each SLC (the AOI
         # is already cropped) instead of the whole scene.
         wsen = (get_opt(cfg, 'slc2ifg.bbox', fallback=None)
-                or get_opt(cfg, 'slc2ifg.crop_slc.wsen', fallback=None))
+                or get_opt(cfg, 'slc2ifg.bbox', fallback=None))
         if wsen:
             p['bbox'] = wsen
             p['bbox_buffer'] = get_float_opt(
                 cfg, 'slc2ifg.bbox_buffer',
-                fallback=get_float_opt(cfg, 'slc2ifg.crop_slc.buffer',
+                fallback=get_float_opt(cfg, 'slc2ifg.bbox_buffer',
                                        fallback=0.0)) or 0.0
         # config keys select.report / select.dot (param names report_file/dot_file)
         rpt = get_opt(cfg, 'slc2ifg.ifgram_list.select.report', fallback=None)
@@ -955,13 +955,13 @@ class Engine:
                                  fallback='auto')
         #: External coherence input for SNAPHU weighting: reuse coherence
         #: rasters produced elsewhere (e.g. ISCE2 or a different filter /
-        #: multilook) by pointing slc2ifg.unwrap.coh_dir (+ coh_pattern) at
+        #: multilook) by pointing slc2ifg.coh_dir (+ coh_pattern) at
         #: them.  Lookup order per pair {d1}_{d2}:
         #:   coh_dir/{d1}_{d2}/{coh_pattern}   (engine product-tree layout)
         #:   coh_dir/{coh_pattern}             (flat fallback)
-        coh_dir_cfg = get_opt(self.config.raw, 'slc2ifg.unwrap.coh_dir',
+        coh_dir_cfg = get_opt(self.config.raw, 'slc2ifg.coh_dir',
                               fallback=None)
-        coh_pat_cfg = get_opt(self.config.raw, 'slc2ifg.unwrap.coh_pattern',
+        coh_pat_cfg = get_opt(self.config.raw, 'slc2ifg.coh_pattern',
                               fallback='*.tif')
 
         for d1, d2 in pairs:
@@ -1126,7 +1126,7 @@ class Engine:
 
                     coh_input: Optional[Path] = None
                     coh_node: Optional[str] = None
-                    # External coherence override: slc2ifg.unwrap.coh_dir +
+                    # External coherence override: slc2ifg.coh_dir +
                     # coh_pattern wins over the engine-generated coherence.
                     if coh_dir_cfg:
                         ext_dir = Path(coh_dir_cfg)
@@ -1137,7 +1137,7 @@ class Engine:
                                 coh_type = 'external'
                                 logger.info(
                                     "unwrap: using external coherence file "
-                                    "%s (slc2ifg.unwrap.coh_dir / "
+                                    "%s (slc2ifg.coh_dir / "
                                     "coh_pattern, dp=%s)", coh_input, dp)
                                 break
                         if coh_input is None:
@@ -1306,15 +1306,15 @@ class Engine:
             base['ps_nlks'] = self._ps_nlks()
         if tool == 'unwrap':
             # waterMaskFile from MintPy's load section doubles as the SNAPHU
-            # mask when slc2ifg.unwrap.snaphu.mask_file is not set (the .wbd
+            # mask when slc2ifg.mask is not set (the .wbd
             # water mask is auto-converted to the ifg grid by _unwrap_single).
             if 'mask_file' not in base or not base['mask_file']:
                 wm = get_opt(cfg, 'mintpy.load.waterMaskFile')
                 if wm:
                     base['mask_file'] = wm
             base['nlooks'] = (
-                _legacy_opt(cfg, 'slc2ifg.unwrap.snaphu.nlooks',
-                            'slc2ifg.unwrap.nlooks', 'float')
+                _legacy_opt(cfg, 'slc2ifg.nlooks',
+                            'slc2ifg.nlooks', 'float')
                 or self._ps_nlks())
             base['ntiles'] = (
                 _legacy_opt(cfg, 'slc2ifg.unwrap.snaphu.ntiles_row',
@@ -1335,7 +1335,7 @@ class Engine:
             default = float(lks_y * lks_x)
         else:
             default = 1.0
-        return get_float_opt(cfg, 'slc2ifg.generate_coh.ps_nlks', fallback=default) or default
+        return get_float_opt(cfg, 'slc2ifg.nlooks', fallback=default) or default
 
     # ------------------------------------------------------------------
     # Execution

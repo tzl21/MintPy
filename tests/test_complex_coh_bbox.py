@@ -33,7 +33,7 @@ def _write_slc(path, arr, gt=GT):
 
 def test_read_complex_image_window(tmp_path):
     """A window read returns only the window and shifts its geotransform."""
-    from mintpy.stdproc.generate_coh_complex import read_complex_image
+    from mintpy.stdproc.generate_coh import read_complex_image
 
     arr = (np.arange(40 * 60).reshape(40, 60)
            + 1j * np.arange(40 * 60).reshape(40, 60)).astype(np.complex64)
@@ -56,7 +56,7 @@ def test_read_complex_image_window(tmp_path):
 
 
 def test_read_complex_image_window_outside(tmp_path):
-    from mintpy.stdproc.generate_coh_complex import read_complex_image
+    from mintpy.stdproc.generate_coh import read_complex_image
 
     p = _write_slc(tmp_path / 'a.slc.tif',
                    np.ones((8, 8), dtype=np.complex64))
@@ -68,7 +68,7 @@ def test_complex_coh_tiled_crop_window_matches_untiled(tmp_path):
     """Tiled + crop_window equals the untiled windowed computation."""
     from mintpy.stdproc.engine.gpu_kernels import complex_coh_block
     from mintpy.stdproc.engine.tiling import complex_coh_tiled
-    from mintpy.stdproc.generate_coh_complex import read_complex_image
+    from mintpy.stdproc.generate_coh import read_complex_image
 
     rng = np.random.default_rng(0)
     rows, cols = 48, 64
@@ -144,14 +144,14 @@ def test_complex_coh_engine_read_crop_wiring(tmp_path):
 def test_complex_coh_tool_crop_window(tmp_path, monkeypatch):
     """The tool writes a window-shaped coherence for a bbox, on both the
     untiled and the tiled path (the bug behind unwrap's shape mismatch)."""
-    import mintpy.stdproc.crop_slc_geo as csg
+    import mintpy.stdproc.io as sio
 
     from mintpy.stdproc.engine.tool import ToolContext
     from mintpy.stdproc.engine.tools.complex_coh import ComplexCohTool
 
     # avoid a PROJ-dependent transform: the bbox maps to a fixed window
     monkeypatch.setattr(
-        csg, 'bbox_to_window',
+        sio, 'bbox_to_window',
         lambda path, wsen, subdataset='/data/VV', buffer=0.0: (13, 7, 30, 25))
 
     rng = np.random.default_rng(1)
