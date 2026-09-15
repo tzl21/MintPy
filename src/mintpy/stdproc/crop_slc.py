@@ -16,7 +16,9 @@ Single implementation for both processors:
   **georeferenced-free** ``yyyymmdd.slc.tif`` (a plain GeoTIFF: same container
   for both processors, no fake coordinates), and the geometry products are kept
   in their original ENVI + ``.hdr`` / ``.xml`` form so that ``prep_isce`` and
-  ``load_data`` keep working unchanged.
+  ``load_data`` keep working unchanged.  The geometry directory is fixed by the
+  standard ISCE2 layout — ``<merged>/geom_reference`` next to the SLC tree — and
+  derived from the SLC input (no configuration key).
 
 The module is a plain implementation library: it has no CLI and no logging
 configuration.  The command line interface lives in ``mintpy/cli/crop_slc.py``.
@@ -116,6 +118,158 @@ def _output_paths(input_files, output_dir, prefix='', by_burst=False,
 # ---------------------------------------------------------------------------
 # isce2 radar window from the lon/lat lookup tables
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# isce2 radar crop: geometry lookup + geometry products
+# ---------------------------------------------------------------------------
+def find_crop_window_from_full_files(lon_full_path, lat_full_path, wsen_bounds):
+    """Minimum bounding rectangle in radar coordinates for a geographic area.
+
+    Returns ``(min_row, max_row, min_col, max_col)`` with a 1-px margin.
+    """
+    for path in (lon_full_path, lat_full_path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f'coordinate file not found: {path}')
+
+    west, south, east, north = wsen_bounds
+
+    import rasterio
+    with rasterio.open(lon_full_path) as lon_src, rasterio.open(lat_full_path) as lat_src:
+        if lon_src.shape != lat_src.shape:
+            raise ValueError(f'coordinate file shapes differ: {lon_src.shape} vs {lat_src.shape}')
+        shape = lon_src.shape
+        cols_total = shape[1]
+
+        # scan in row blocks: a full-resolution topsApp geometry file is
+        # ~1.6 GB per band, so reading lon+lat whole would need >3 GB of RAM.
+        block_rows = max(1, int(64_000_000 // max(cols_total, 1)))   # ~64 MB/band
+        min_row = min_col = None
+        max_row = max_col = -1
+        for r0 in range(0, shape[0], block_rows):
+            r1 = min(r0 + block_rows, shape[0])
+            win = rasterio.windows.Window(0, r0, cols_total, r1 - r0)
+            lon_b = lon_src.read(1, window=win)
+            lat_b = lat_src.read(1, window=win)
+            mask = ((lon_b >= west) & (lon_b <= east)
+                    & (lat_b >= south) & (lat_b <= north))
+            if not np.any(mask):
+                continue
+            rows, cols = np.where(mask)
+            b_min_row, b_max_row = r0 + int(rows.min()), r0 + int(rows.max())
+            b_min_col, b_max_col = int(cols.min()), int(cols.max())
+            min_row = b_min_row if min_row is None else min(min_row, b_min_row)
+            max_row = max(max_row, b_max_row)
+            min_col = b_min_col if min_col is None else min(min_col, b_min_col)
+            max_col = max(max_col, b_max_col)
+
+    if min_row is None:
+        raise ValueError('no pixels found within the specified geographic bounds')
+
+    min_row = max(0, min_row - 1)
+    max_row = min(shape[0] - 1, max_row + 1)
+    min_col = max(0, min_col - 1)
+    max_col = min(shape[1] - 1, max_col + 1)
+    return min_row, max_row, min_col, max_col
+
+
+def _write_envi_hdr(hdr_path, width, height, bands, dtype):
+    """Write an ENVI .hdr for a binary raster (geometry products only)."""
+    dtype_map = {
+        np.dtype('float32'): 4, np.dtype('float64'): 5,
+        np.dtype('int16'): 2, np.dtype('uint16'): 12,
+        np.dtype('int32'): 3, np.dtype('uint32'): 13,
+        np.dtype('byte'): 1,
+    }
+    lines = [
+        'ENVI',
+        f'samples = {width}',
+        f'lines   = {height}',
+        f'bands   = {bands}',
+        'header offset = 0',
+        'file type = ENVI Standard',
+        f'data type = {dtype_map.get(np.dtype(dtype), 4)}',
+        'interleave = bsq',
+        'byte order = 0',
+        'band names = {',
+    ]
+    lines.extend(f'Band {b},' for b in range(1, bands + 1))
+    lines.append('}')
+    # NB: no 'data ignore value' line - 0 is a valid value for geometry products
+    with open(hdr_path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
+def crop_coordinate_files(geom_dir, crop_window, output_geom_dir,
+                          no_skip_existing=False):
+    """Crop every ``*.full`` geometry file, band by band, keeping ENVI + xml."""
+    import rasterio
+    from .utils.slc2ifg_utils import create_xml_file, create_xml_for_binary
+
+    full_files = sorted(glob.glob(os.path.join(geom_dir, '*.full')))
+    if not full_files:
+        logger.warning('no .full geometry files found in %s', geom_dir)
+        return []
+
+    os.makedirs(output_geom_dir, exist_ok=True)
+    min_row, max_row, min_col, max_col = crop_window
+    height = max_row - min_row + 1
+    width = max_col - min_col + 1
+
+    results = []
+    for full_file in full_files:
+        output_path = os.path.join(output_geom_dir, os.path.basename(full_file))
+        if os.path.exists(output_path) and not no_skip_existing:
+            results.append((full_file, output_path, True, 'Skipped (exists)'))
+            continue
+
+        try:
+            # prefer the .vrt when there is no matching .hdr, otherwise GDAL may
+            # fall back to a wrong same-named .hdr (e.g. los.hdr for los.rdr.full)
+            open_path = full_file
+            if os.path.isfile(full_file + '.vrt') and not os.path.isfile(full_file + '.hdr'):
+                open_path = full_file + '.vrt'
+
+            with rasterio.open(open_path) as src:
+                src_shape = src.shape
+                if min_row < 0 or max_row >= src_shape[0] or min_col < 0 or max_col >= src_shape[1]:
+                    results.append((full_file, output_path, False,
+                                    f'crop window out of bounds. image shape: {src_shape}'))
+                    continue
+
+                window = rasterio.windows.Window(min_col, min_row, width, height)
+                band1 = src.read(1, window=window)
+                out_dtype = band1.dtype
+                band_count = src.count
+
+                out_meta = src.meta.copy()
+                out_meta.update({
+                    'driver': 'ENVI', 'height': height, 'width': width,
+                    'count': band_count, 'dtype': out_dtype,
+                    'transform': rasterio.windows.transform(window, src.transform),
+                    'crs': None,
+                })
+                with rasterio.open(output_path, 'w', **out_meta) as dest:
+                    for band_idx in range(1, band_count + 1):
+                        dest.write(src.read(band_idx, window=window), band_idx)
+
+            hdr_path = output_path + '.hdr'
+            if not os.path.isfile(hdr_path):
+                _write_envi_hdr(hdr_path, width, height, band_count, out_dtype)
+
+            input_xml = full_file + '.xml'
+            if os.path.exists(input_xml):
+                create_xml_file(input_xml, output_path + '.xml', crop_window, output_path)
+            else:
+                create_xml_for_binary(output_path, family='image',
+                                      description=f'Cropped {os.path.basename(full_file)}')
+
+            results.append((full_file, output_path, True, f'Success - {band_count} bands'))
+        except Exception as exc:                                  # noqa: BLE001
+            logger.error('error cropping %s: %s', full_file, exc)
+            results.append((full_file, output_path, False, f'Error: {exc}'))
+
+    return results
+
+
 def _default_nodata(dtype):
     return np.nan if np.issubdtype(np.dtype(dtype), np.inexact) else 0
 
@@ -209,6 +363,24 @@ def crop_geocoded(src, out_file, wsen, subdataset=None, buffer=0.0,
     return True
 
 
+def crop_radar(src, out_file, crop_window, fill_nan=False) -> bool:
+    """Crop one radar-coordinate (isce2) SLC into a georeferenced-free GeoTIFF."""
+    src = str(src)
+    if crop_window is None:
+        raise ValueError('crop window required for radar-coordinate processing')
+
+    min_row, max_row, min_col, max_col = crop_window
+    data, _ = sio.read_raster(src, box=(min_col, min_row, max_col + 1, max_row + 1))
+    data = _maybe_fill_nan(data, fill_nan)
+    data = np.asarray(data)
+
+    # geo=False -> a plain GeoTIFF: no CRS, no geotransform, no fake coordinates
+    sio.write_raster(data, out_file, meta={'FILE_TYPE': '.slc'}, geo=False,
+                     processor='isce2', compress='LZW', tiled=True,
+                     nodata=_default_nodata(data.dtype))
+    return True
+
+
 def _expand(wsen, buffer):
     w, s, e, n = (float(v) for v in wsen)
     return (w - buffer, s - buffer, e + buffer, n + buffer)
@@ -227,12 +399,12 @@ def _summary(results, what):
 # public entry point
 # ---------------------------------------------------------------------------
 def crop_slc(input_dir, output_dir, bbox, processor='isce3', pattern=None,
-             buffer=0.0, by_burst=False,
+             buffer=0.0, by_burst=False, geom_dir=None,
              file_list=None, subdataset=None, workers=1,
              no_skip_existing=False, no_burst_dirs=False,
              dest_epsg=None, fill_nan=False, compress_level=6,
              dry_run=False) -> int:
-    """Crop SLCs to a geographic bbox.
+    """Crop SLCs to a geographic bbox (isce3 geocoded / isce2 radar).
 
     Parameters
     ----------
@@ -242,13 +414,17 @@ def crop_slc(input_dir, output_dir, bbox, processor='isce3', pattern=None,
         Directory for the cropped SLCs (``yyyymmdd.slc.tif``).
     bbox : tuple of 4 floats
         (west, south, east, north) in EPSG:4326.
-    processor : {'isce3', 'isce2'}
+    processor : {'isce2', 'isce3'}
     pattern : str, optional
         Input glob; defaults to the processor's raw SLC pattern.
     buffer : float
         Extra margin in degrees around ``bbox``.
     by_burst, no_burst_dirs : bool
         Per-burst output subdirectory (id detected from the input path).
+    geom_dir : str or Path, optional
+        ISCE2 geometry dir (``lat.rdr.full`` / ``lon.rdr.full``).  When omitted
+        for isce2, the standard ISCE2 ``<merged>/geom_reference`` next to the
+        SLC tree is used (derived from ``input_dir``).
     file_list : str, optional
         Explicit input file list (takes precedence over ``input_dir``).
     subdataset : str, optional
@@ -273,11 +449,17 @@ def crop_slc(input_dir, output_dir, bbox, processor='isce3', pattern=None,
         raise ValueError(f'unsupported processor: {processor}')
 
     if processor == 'isce2':
-        raise ValueError(
-            'bbox cropping requires geocoded (isce3) SLCs; isce2 '
-            'radar-coordinate SLCs have no georeferencing to crop by bbox')
-    if processor == 'isce2' and dest_epsg:
-        logger.warning('dest_epsg is ignored for isce2 radar-coordinate products')
+        if geom_dir is None:
+            from .utils.slc_input import standard_geom_dir
+            geom_dir = standard_geom_dir(input_dir)
+        if not geom_dir:
+            raise ValueError(
+                'isce2 bbox crop requires the standard ISCE2 geometry dir '
+                '(<merged>/geom_reference with lat.rdr.full / lon.rdr.full); '
+                f'none found next to {input_dir}')
+        logger.info('isce2 crop geometry: %s', geom_dir)
+        if dest_epsg:
+            logger.warning('dest_epsg is ignored for isce2 radar-coordinate products')
 
     if pattern is None:
         pattern = naming.slc_pattern(processor)
@@ -303,9 +485,27 @@ def crop_slc(input_dir, output_dir, bbox, processor='isce3', pattern=None,
             logger.info('DRY RUN: %s -> %s', src, out)
         return 0
 
+    # radar crop window + geometry, computed once
+    crop_window = None
+    coord_results = []
+    if processor == 'isce2':
+        crop_window = find_crop_window_from_full_files(
+            os.path.join(str(geom_dir), 'lon.rdr.full'),
+            os.path.join(str(geom_dir), 'lat.rdr.full'),
+            _expand(bbox, buffer),
+        )
+        output_geom_dir = os.path.join(
+            os.path.dirname(os.path.abspath(output_dir)), 'geom')
+        coord_results = crop_coordinate_files(
+            str(geom_dir), crop_window, output_geom_dir,
+            no_skip_existing=no_skip_existing)
+
     def _work(task):
         src, out = task
         try:
+            if processor == 'isce2':
+                return (src, out, crop_radar(src, out, crop_window,
+                                             fill_nan=fill_nan), '')
             return (src, out, crop_geocoded(
                 src, out, bbox, subdataset=subdataset, buffer=buffer,
                 dest_epsg=dest_epsg, fill_nan=fill_nan,
@@ -324,4 +524,6 @@ def crop_slc(input_dir, output_dir, bbox, processor='isce3', pattern=None,
                 results = list(pool.map(_work, todo))
 
     failed = _summary(results, 'SLC')
+    if coord_results:
+        failed += _summary(coord_results, 'coordinate files')
     return 0 if failed == 0 else 1

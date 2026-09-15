@@ -8,9 +8,8 @@ The canonical key is the SINGLE top-level ``slc2ifg.<name>`` (e.g.
 one deprecation cycle through :func:`normalize_config`, which is applied once at
 every entry point that reads a raw config dict.
 
-Keys that were removed outright (their feature is now automatic) are listed in
-:data:`REMOVED_KEYS`: they are warned about and dropped, so old configs keep
-loading instead of failing.
+Keys that no longer exist are simply not read by the code: they may stay in a
+user config without any effect (and without an error).
 """
 
 import logging
@@ -34,68 +33,6 @@ LEGACY_ALIASES = {
     'slc2ifg.crop_slc.no_skip_existing': 'engine.no_skip_existing',
     # executor selector
     'mintpy.slc2ifg.engine': 'slc2ifg.engine',
-}
-
-#: keys that are accepted but no longer have any effect.  Every key whose
-#: feature became automatic (slc pattern inference, HDF5 subdataset detection,
-#: coherence auto-discovery, fixed product paths) is listed here so existing
-#: configurations keep loading with a deprecation warning.
-REMOVED_KEYS = {
-    'mintpy.slc2ifg.skip',
-    'slc2ifg.ifgram_list.oneyear_interferograms',
-    'slc2ifg.generate_coh.skip_phase_sigma',
-    'slc2ifg.generate_coh.skip_complex_coherence',
-    # SLC discovery: the pattern is inferred from slc2ifg.slc_input
-    'slc2ifg.slc_pattern',
-    'slc2ifg.crop_slc.pattern',
-    'slc2ifg.generate_ifgram.slc_pattern',
-    'slc2ifg.generate_coh.slc_pattern',
-    'slc2ifg.ifgram_list.select.slc_pattern',
-    # HDF5 subdataset is auto-detected (/data/[VV,VH,HH], preferring VV)
-    'slc2ifg.subdataset',
-    'slc2ifg.generate_ifgram.subdataset',
-    'slc2ifg.generate_coh.subdataset',
-    # product patterns: all slc2ifg products are .tif
-    'slc2ifg.ifg_pattern',
-    'slc2ifg.cor_pattern',
-    'slc2ifg.unw_pattern',
-    # coherence rasters are auto-discovered under <work_dir>/ifgrams/*
-    'slc2ifg.coh_dir',
-    'slc2ifg.coh_pattern',
-    'slc2ifg.coh_kind',
-    'slc2ifg.coh_variant',
-    'slc2ifg.coh_stat',
-    'slc2ifg.coh_usable_threshold',
-    'slc2ifg.unwrap.coh_dir',
-    'slc2ifg.unwrap.coh_pattern',
-    'slc2ifg.ifgram_list.select.coh_dir',
-    'slc2ifg.ifgram_list.select.coh_kind',
-    'slc2ifg.ifgram_list.select.coh_variant',
-    'slc2ifg.ifgram_list.select.coh_stat',
-    'slc2ifg.ifgram_list.select.coh_usable_threshold',
-    # geometry is no longer cropped/multilooked by the pipeline; load_data
-    # downsamples a full-resolution geometry file to the interferogram size
-    'slc2ifg.geom_dir',
-    'slc2ifg.crop_slc.geom_dir',
-    'slc2ifg.multilook.geom_dir',
-    'slc2ifg.crop_slc.prefix',
-    'slc2ifg.crop_slc.by_burst',
-    # product paths / verification are fixed
-    'slc2ifg.generate_ifgram.output_dir',
-    'slc2ifg.generate_ifgram.no_verify',
-    # selection: fixed window, measured-coherence-only weights, no floor
-    'slc2ifg.ifgram_list.select.quick_window',
-    'slc2ifg.ifgram_list.select.weight_source',
-    'slc2ifg.ifgram_list.select.model_tau_days',
-    'slc2ifg.ifgram_list.select.model_gamma0',
-    'slc2ifg.ifgram_list.select.quality_threshold',
-    # engine mid-chain entry reads <work_dir>/ifgrams automatically
-    'engine.input_dir',
-    'engine.input_variant',
-    'engine.keep_variants',
-    # stitch file types are detected under <work_dir>/ifgrams; bounds follow bbox
-    'slc2ifg.stitch.file_types',
-    'slc2ifg.stitch.out_bounds',
 }
 
 
@@ -148,10 +85,5 @@ def normalize_config(config):
             set_(new, get(old))
         logger.warning("config key '%s' is deprecated, use '%s'", old, new)
         remove(old)
-
-    for key in REMOVED_KEYS:
-        if has(key):
-            logger.warning("config key '%s' is no longer used and is ignored", key)
-            remove(key)
 
     return config
