@@ -194,9 +194,9 @@ def test_read_isce3_geotiff_no_nodata(tmp_path):
 
 
 #########################################################################
-# water mask auto-align (geometryDict._warp_water_mask)
+# water mask auto-align (geometryDict._warp_to_target_grid)
 #########################################################################
-def test_warp_water_mask(tmp_path):
+def test_warp_to_target_grid(tmp_path):
     # reference grid: 10 x 8 pixels at 10 m
     ref_fname = str(tmp_path / 'ref.tif')
     _write_synthetic_geotiff(ref_fname, shape=(8, 10))
@@ -220,7 +220,7 @@ def test_warp_water_mask(tmp_path):
         datasetDict={'height': ref_fname, 'waterMask': src_fname},
         extraMetadata={'dummy': 'x'},
     )
-    result = geom_obj._warp_water_mask('waterMask', 8, 10)
+    result = geom_obj._warp_to_target_grid('waterMask', 8, 10)
     assert result.shape == (8, 10)
     assert set(np.unique(result)).issubset({0.0, 1.0})
     # the top row of the source (water) stays water after the warp
