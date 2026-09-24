@@ -18,7 +18,7 @@ import warnings
 
 import h5py
 import numpy as np
-from osgeo import gdal
+from osgeo import gdal, osr
 from skimage.transform import resize
 
 from mintpy.multilook import multilook_data
@@ -28,6 +28,33 @@ from mintpy.objects import (
     IFGRAM_DSET_NAMES,
 )
 from mintpy.utils import attribute as attr, ptime, readfile, utils0 as ut
+
+
+def _extent_in_srs(geotransform, size, src_wkt, dst_wkt):
+    """Raster extent ``(xmin, ymin, xmax, ymax)`` expressed in ``dst_wkt``.
+
+    Parameters: geotransform - tuple of 6 floats (GDAL convention)
+                size         - (ncols, nrows) of the raster
+                src_wkt      - WKT of the raster CRS
+                dst_wkt      - WKT of the target CRS
+    """
+    src = osr.SpatialReference()
+    src.ImportFromWkt(src_wkt)
+    dst = osr.SpatialReference()
+    dst.ImportFromWkt(dst_wkt)
+    # (x, y) = (easting, northing) / (lon, lat), never the authority order
+    src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    transform = osr.CoordinateTransformation(src, dst)
+
+    xs, ys = [], []
+    for col, row in ((0, 0), (size[0], 0), (size[0], size[1]), (0, size[1])):
+        x = geotransform[0] + col * geotransform[1] + row * geotransform[2]
+        y = geotransform[3] + col * geotransform[4] + row * geotransform[5]
+        px, py = transform.TransformPoint(x, y)[:2]
+        xs.append(px)
+        ys.append(py)
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 ########################################################################################
@@ -512,14 +539,30 @@ class geometryDict:
                                        xstep=xstep,
                                        ystep=ystep)
 
-        # full-resolution geometry vs multilooked observations: downsample to
-        # the observation grid so the geometry matches the interferogram size.
+        # geometry vs the observation grid.  Same grid (only the sampling
+        # differs, e.g. full-resolution geometry vs multilooked ifgrams) ->
+        # downsample; different CRS / footprint (e.g. a global water mask) ->
+        # reproject.  Resizing by shape alone is only valid in the first case.
         if self.ref_size is not None and np.ndim(data) == 2:
             target = self.get_size(box=box, xstep=xstep, ystep=ystep)
-            if (data.shape[0] >= target[0] and data.shape[1] >= target[1]
-                    and tuple(data.shape) != tuple(target)):
-                print(f'    downsample {family}: {data.shape} -> {tuple(target)}')
-                data = self._downsample_to(data, target, family)
+            if tuple(data.shape) != tuple(target):
+                if not self._same_grid_as_target(self.file):
+                    # different CRS / footprint -> reproject, whatever the
+                    # source resolution is (coarser or finer than the target)
+                    print(f'    reproject {family}: {data.shape} -> {tuple(target)} '
+                          '(different CRS/footprint from the observation grid)')
+                    data = self._warp_to_target_grid(family, *self.get_size())
+                    # apply the read window / multilook, as readfile.read did
+                    # for the source-grid pixels
+                    if box is not None:
+                        x0, y0, x1, y1 = (int(v) for v in box)
+                        data = data[y0:y1, x0:x1]
+                    if xstep > 1 or ystep > 1:
+                        data = data[::ystep, ::xstep]
+                elif data.shape[0] >= target[0] and data.shape[1] >= target[1]:
+                    # same grid, finer sampling: block mean / resize
+                    print(f'    downsample {family}: {data.shape} -> {tuple(target)}')
+                    data = self._downsample_to(data, target, family)
         return data, metadata
 
     def get_slant_range_distance(self, box=None, xstep=1, ystep=1):
@@ -677,10 +720,96 @@ class geometryDict:
 
         return self.metadata
 
-    def _warp_water_mask(self, dsName, target_length, target_width):
-        """Reproject water mask to match reference geometry grid via GDAL Warp.
+    @staticmethod
+    def _raster_grid(file_path):
+        """``(geotransform, projection WKT, (ncols, nrows))`` of a raster.
 
-        Parameters: dsName          - str, dataset name (waterMask)
+        ``(None, None, None)`` when the file is missing or has no
+        georeferencing, so that callers can fall back to the legacy behaviour.
+        """
+        if not file_path:
+            return None, None, None
+        try:
+            ds = gdal.Open(str(file_path), gdal.GA_ReadOnly)
+        except Exception:
+            # missing / unreadable / not a GDAL dataset: report "unknown grid"
+            # so that the caller keeps the legacy behaviour instead of failing
+            return None, None, None
+        if ds is None:
+            return None, None, None
+        geotransform = ds.GetGeoTransform(can_return_null=True)
+        projection = ds.GetProjection()
+        size = (ds.RasterXSize, ds.RasterYSize)
+        ds = None
+        if geotransform is None:
+            return None, projection, size
+        return tuple(geotransform), projection, size
+
+    def _target_grid(self):
+        """``(geotransform, projection WKT)`` of the target (observation) grid.
+
+        Taken from the observation metadata (``extraMetadata``: the
+        interferogram stack) when it carries a geotransform; otherwise from the
+        first geometry file, which is the reference grid the older code
+        assumed.
+        """
+        meta = self.extraMetadata or {}
+        if all(k in meta for k in ('X_FIRST', 'Y_FIRST', 'X_STEP', 'Y_STEP')):
+            geotransform = (
+                float(meta['X_FIRST']), float(meta['X_STEP']), 0.0,
+                float(meta['Y_FIRST']), 0.0, float(meta['Y_STEP']),
+            )
+            projection = meta.get('PROJ') or None
+            if not projection and self.dsNames:
+                projection = self._raster_grid(self.datasetDict[self.dsNames[0]])[1]
+            return geotransform, projection
+        if not self.dsNames:
+            return None, None
+        return self._raster_grid(self.datasetDict[self.dsNames[0]])[:2]
+
+    def _same_grid_as_target(self, file_path) -> bool:
+        """True when ``file_path`` already lies on the target (observation) grid.
+
+        Then only the sampling differs, so the block-mean / resize path
+        (:meth:`_downsample_to`) is valid.  False for a raster with a different
+        CRS or footprint (e.g. a global 1-arcsec water mask), which must be
+        reprojected instead.  Unknown grids keep the legacy behaviour.
+        """
+        tgt_gt, tgt_proj = self._target_grid()
+        src_gt, src_proj, src_size = self._raster_grid(file_path)
+        if tgt_gt is None or src_gt is None or not self.ref_size:
+            return True
+
+        if tgt_proj and src_proj:
+            srs_tgt = osr.SpatialReference()
+            srs_tgt.ImportFromWkt(tgt_proj)
+            srs_src = osr.SpatialReference()
+            srs_src.ImportFromWkt(src_proj)
+            if not srs_tgt.IsSame(srs_src):
+                return False
+
+        # same CRS: the first and last pixel of the source must coincide with
+        # the target grid (a pure resolution difference is what we resample)
+        tgt_length, tgt_width = (int(v) for v in self.ref_size)
+        src_x0, src_y0 = src_gt[0], src_gt[3]
+        src_x1 = src_x0 + (src_size[0] - 1) * src_gt[1]
+        src_y1 = src_y0 + (src_size[1] - 1) * src_gt[5]
+        tgt_x0, tgt_y0 = tgt_gt[0], tgt_gt[3]
+        tgt_x1 = tgt_x0 + (tgt_width - 1) * tgt_gt[1]
+        tgt_y1 = tgt_y0 + (tgt_length - 1) * tgt_gt[5]
+        tol = 2.0 * max(abs(src_gt[1]), abs(src_gt[5]),
+                        abs(tgt_gt[1]), abs(tgt_gt[5]))
+        return (abs(src_x0 - tgt_x0) <= tol and abs(src_y0 - tgt_y0) <= tol
+                and abs(src_x1 - tgt_x1) <= tol and abs(src_y1 - tgt_y1) <= tol)
+
+    def _warp_to_target_grid(self, dsName, target_length, target_width):
+        """Reproject a raster onto the target (observation) grid via GDAL Warp.
+
+        Used for any dataset that is not already on that grid (see
+        :meth:`_same_grid_as_target`), e.g. a global water mask in EPSG:4326
+        covering a different area than the interferograms.
+
+        Parameters: dsName          - str, dataset name (e.g. waterMask)
                     target_length   - int, target rows
                     target_width    - int, target columns
         Returns:    data            - np.ndarray (target_length, target_width)
@@ -688,11 +817,10 @@ class geometryDict:
         import tempfile
 
         src_file = self.datasetDict[dsName]
-        ref_file = self.datasetDict[self.dsNames[0]]
-        ref_ds = gdal.Open(ref_file)
-        ref_gt = ref_ds.GetGeoTransform()
-        ref_srs = ref_ds.GetProjection()
-        ref_ds = None
+        ref_gt, ref_srs = self._target_grid()
+        if ref_gt is None:
+            raise RuntimeError(
+                f'no target geotransform to reproject {src_file} onto')
 
         xmin = ref_gt[0]
         ymax = ref_gt[3]
@@ -701,14 +829,27 @@ class geometryDict:
         dx = abs(ref_gt[1])
         dy = abs(ref_gt[5])
 
-        src_ds = gdal.Open(src_file)
-        src_srs = src_ds.GetProjection()
-        src_ds = None
+        src_gt, src_srs, src_size = self._raster_grid(src_file)
         if not src_srs:
             # source file may lack embedded projection (e.g. GeoTIFF
             # written before PROJ_DATA was set). Assume EPSG:4326.
-            print('    (source water mask has no projection, assuming EPSG:4326)')
+            print(f'    (source {os.path.basename(str(src_file))} has no '
+                  'projection, assuming EPSG:4326)')
             src_srs = 'EPSG:4326'
+
+        # a mask from a different region would silently become all-zero
+        # (all water) after the warp - say so instead
+        if ref_srs and src_gt is not None and src_size is not None:
+            try:
+                s_ext = _extent_in_srs(src_gt, src_size, src_srs, ref_srs)
+                if (s_ext[0] > xmax or s_ext[2] < xmin
+                        or s_ext[1] > ymax or s_ext[3] < ymin):
+                    warnings.warn(
+                        f'{os.path.basename(str(src_file))} ({dsName}) does not '
+                        'overlap the interferogram grid at all - check the '
+                        'input file path (e.g. mintpy.load.waterMaskFile)')
+            except Exception as exc:                     # pragma: no cover
+                print(f'    (overlap check skipped: {exc})')
 
         # Use the GDAL Python API (same engine as the gdalwarp CLI), with a
         # guaranteed temp-file cleanup via try/finally.
@@ -844,7 +985,7 @@ class geometryDict:
                         # (e.g. 1-arcsec global water mask vs 20 m interferogram grid)
                         if data.shape != (length, width):
                             print(f'    auto-aligning waterMask: {data.shape} -> ({length}, {width})')
-                            data = self._warp_water_mask(dsName, length, width)
+                            data = self._warp_to_target_grid(dsName, length, width)
 
                         # GMTSAR water/land mask: 1 for land, and nan for water / no data
                         if np.sum(np.isnan(data)) > 0:
