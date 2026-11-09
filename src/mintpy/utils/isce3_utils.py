@@ -1,10 +1,14 @@
 import glob
 import os
 import re
+import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Dict, List, Optional, Union
+from xml.sax.saxutils import escape
 
 
 # Ensure PROJ/GDAL data paths are set when running without conda activation,
@@ -25,6 +29,7 @@ _setup_gdal_proj_data()
 
 import h5py  # noqa: E402
 import numpy as np  # noqa: E402
+from osgeo import gdal, osr  # noqa: E402
 
 from mintpy.constants import (  # noqa: E402
     GEOMETRY_FILENAMES as GEOMETRY_FILENAMES,
@@ -647,3 +652,610 @@ def read_baseline_timeseries_isce3(baseline_dir, burst_ids=None):
 
     baseline_dict[ref_info['ref_date']] = [0.0, 0.0]
     return baseline_dict
+
+
+def extract_h5_geometry(
+    h5_file: Union[str, Path],
+    output_dir: Path,
+    geom_types: List[str],
+    dataset_mapping: Optional[Dict[str, str]] = None,
+    x_coords_name: str = "x_coordinates",
+    y_coords_name: str = "y_coordinates",
+    projection_name: str = "projection"
+) -> Dict[str, Dict]:
+    """Extract geometry datasets from a static_layers HDF5 file to GeoTIFF.
+
+    Parameters
+    ----------
+    h5_file : Path or str
+        Path to the HDF5 file.
+    output_dir : Path
+        Directory to save extracted GeoTIFFs.
+    geom_types : list of str
+        Desired output filenames (e.g., ['height.tif', 'los_east.tif']).
+    dataset_mapping : dict, optional
+        Mapping from output filename to HDF5 dataset path.
+    x_coords_name, y_coords_name, projection_name : str
+        Names of coordinate and projection datasets.
+
+    Returns
+    -------
+    dict
+        Keys are geometry types, values are dicts with 'file_list' and 'nodata'.
+
+    """
+    if dataset_mapping is None:
+        dataset_mapping = GEOMETRY_DSET_MAPPING
+
+    extracted = defaultdict(lambda: {'file_list': None, 'nodata': None})
+    h5_file = Path(h5_file)
+    if not h5_file.exists():
+        return extracted
+
+    try:
+        with h5py.File(h5_file, 'r') as h5f:
+            data_group = h5f['/data']
+
+            # Get EPSG from projection dataset
+            epsg = 4326
+            if projection_name in data_group:
+                proj_ds = data_group[projection_name]
+                if 'epsg_code' in proj_ds.attrs:
+                    epsg = int(proj_ds.attrs['epsg_code'])
+                elif 'spatial_ref' in proj_ds.attrs:
+                    wkt = proj_ds.attrs['spatial_ref'].decode('utf-8')
+                    srs = osr.SpatialReference()
+                    srs.ImportFromWkt(wkt)
+                    if srs.GetAuthorityCode(None):
+                        epsg = int(srs.GetAuthorityCode(None))
+                elif proj_ds.shape == () and np.issubdtype(proj_ds.dtype, np.integer):
+                    epsg = int(proj_ds[()])
+
+            # Read coordinates
+            x_coords = data_group[x_coords_name][:] if x_coords_name in data_group else None
+            y_coords = data_group[y_coords_name][:] if y_coords_name in data_group else None
+            geotransform = None
+            if x_coords is not None and y_coords is not None and len(x_coords) > 1 and len(y_coords) > 1:
+                dx = abs(x_coords[1] - x_coords[0])
+                dy = abs(y_coords[1] - y_coords[0])
+                left = x_coords[0] - dx / 2
+                top = y_coords[0] + dy / 2
+                geotransform = (left, dx, 0.0, top, 0.0, -dy)
+
+            # Extract each geometry type
+            for geom_type in geom_types:
+                ds_path = dataset_mapping.get(geom_type)
+                if ds_path is None:
+                    continue
+                if ds_path not in data_group:
+                    continue
+                dataset = data_group[ds_path]
+                data = dataset[:]
+
+                # Determine nodata value
+                nodata = None
+                if '_FillValue' in dataset.attrs:
+                    nodata = dataset.attrs['_FillValue'].item()
+                elif np.issubdtype(data.dtype, np.floating):
+                    nodata = np.nan
+                elif np.issubdtype(data.dtype, np.integer):
+                    nodata = np.iinfo(data.dtype).max
+
+                # Write GeoTIFF
+                h5_stem = h5_file.stem
+                file_output_dir = output_dir / h5_stem
+                file_output_dir.mkdir(parents=True, exist_ok=True)
+                out_file = file_output_dir / geom_type
+
+                driver = gdal.GetDriverByName('GTiff')
+                ds_out = driver.Create(
+                    str(out_file),
+                    data.shape[1], data.shape[0],
+                    1,
+                    gdal.GDT_Float32 if data.dtype == np.float32 else gdal.GDT_Float64,
+                    options=['COMPRESS=LZW']
+                )
+                if geotransform:
+                    ds_out.SetGeoTransform(geotransform)
+                try:
+                    srs = osr.SpatialReference()
+                    if srs.ImportFromEPSG(epsg) != 0:
+                        raise RuntimeError(f'ImportFromEPSG({epsg}) failed')
+                    ds_out.SetProjection(srs.ExportToWkt())
+                except Exception as crs_err:
+                    print(f'WARNING: could not set CRS EPSG:{epsg} for {geom_type} '
+                          f'({crs_err}). Writing GeoTIFF without projection. '
+                          f'Check PROJ_DATA environment variable / conda activation.')
+                band = ds_out.GetRasterBand(1)
+                band.WriteArray(data)
+                if nodata is not None:
+                    band.SetNoDataValue(nodata)
+                band.FlushCache()
+                ds_out = None
+
+                extracted[geom_type]['file_list'] = out_file
+                extracted[geom_type]['nodata'] = nodata
+
+    except Exception as e:
+        raise RuntimeError(f'failed to extract geometry from {h5_file}: {e}') from e
+
+    return extracted
+
+_GDAL_DTYPE_MAP = {
+    'float32': 'Float32',
+    'float64': 'Float64',
+}
+
+
+def build_vrt_from_h5(
+    h5_file: Union[str, Path],
+    output_dir: Path,
+    geom_types: List[str],
+    dataset_mapping: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict]:
+    """Build tiny VRT files referencing HDF5 subdatasets directly (no raster copy).
+
+    Fast alternative to extract_h5_geometry(): only the 1D coordinate arrays and
+    dataset attributes are read; the actual raster data stays in the HDF5 file and
+    is streamed block-wise by gdalwarp later.
+
+    Parameters
+    ----------
+    h5_file : Path or str
+        Path to the static_layers HDF5 file.
+    output_dir : Path
+        Directory to save the VRT files (one subdir per HDF5 stem).
+    geom_types : list of str
+        Desired output filenames (e.g., ['height.tif', 'los_east.tif']).
+    dataset_mapping : dict, optional
+        Mapping from output filename to HDF5 dataset name under /data.
+
+    Returns
+    -------
+    dict
+        Keys are geometry types, values are dicts with 'file_list' (VRT path)
+        and 'nodata'.
+
+    """
+    if dataset_mapping is None:
+        dataset_mapping = GEOMETRY_DSET_MAPPING
+
+    extracted = defaultdict(lambda: {'file_list': None, 'nodata': None})
+    h5_file = Path(h5_file).resolve()
+    if not h5_file.exists():
+        return extracted
+
+    with h5py.File(h5_file, 'r') as h5f:
+        data_group = h5f['/data']
+
+        # EPSG code
+        epsg = 4326
+        if 'projection' in data_group:
+            proj_ds = data_group['projection']
+            if 'epsg_code' in proj_ds.attrs:
+                epsg = int(proj_ds.attrs['epsg_code'])
+            elif proj_ds.shape == () and np.issubdtype(proj_ds.dtype, np.integer):
+                epsg = int(proj_ds[()])
+
+        # Geotransform from 1D coordinate arrays (cell centers -> top-left corner)
+        for coord_name in ['x_coordinates', 'y_coordinates']:
+            if coord_name not in data_group:
+                raise KeyError(f'missing /data/{coord_name} in {h5_file}')
+        x_coords = data_group['x_coordinates'][:]
+        y_coords = data_group['y_coordinates'][:]
+        if len(x_coords) < 2 or len(y_coords) < 2:
+            raise ValueError(f'degenerate geometry grid in {h5_file}: '
+                             f'{len(y_coords)} rows x {len(x_coords)} columns')
+        dx = abs(x_coords[1] - x_coords[0])
+        dy = abs(y_coords[1] - y_coords[0])
+        left = x_coords[0] - dx / 2
+        top = y_coords[0] + dy / 2
+        geotransform = (left, dx, 0.0, top, 0.0, -dy)
+
+        srs = osr.SpatialReference()
+        if srs.ImportFromEPSG(epsg) != 0:
+            raise RuntimeError(f'ImportFromEPSG({epsg}) failed (check PROJ_DATA)')
+        srs_wkt = srs.ExportToWkt()
+
+        vrt_dir = Path(output_dir) / h5_file.stem
+        vrt_dir.mkdir(parents=True, exist_ok=True)
+
+        for geom_type in geom_types:
+            ds_name = dataset_mapping.get(geom_type)
+            if ds_name is None or ds_name not in data_group:
+                continue
+            dataset = data_group[ds_name]
+            length, width = dataset.shape
+
+            # Match legacy extract_h5_geometry dtype behavior: float32 or float64
+            gdal_dtype = _GDAL_DTYPE_MAP.get(dataset.dtype.name, 'Float32')
+
+            # Determine nodata (same rules as extract_h5_geometry)
+            if '_FillValue' in dataset.attrs:
+                nodata = dataset.attrs['_FillValue'].item()
+            elif np.issubdtype(dataset.dtype, np.floating):
+                nodata = np.nan
+            elif np.issubdtype(dataset.dtype, np.integer):
+                nodata = np.iinfo(dataset.dtype).max
+            else:
+                nodata = None
+
+            # escape free-text fields, in case the input path contains &, < or >
+            src_fname = escape(f'HDF5:"{h5_file}"://data/{ds_name}')
+            nodata_xml = ''
+            if nodata is not None:
+                nodata_xml = f'    <NoDataValue>{nodata}</NoDataValue>\n'
+            vrt_xml = (
+                f'<VRTDataset rasterXSize="{width}" rasterYSize="{length}">\n'
+                f'  <SRS>{escape(srs_wkt)}</SRS>\n'
+                f'  <GeoTransform>{", ".join(repr(float(v)) for v in geotransform)}</GeoTransform>\n'
+                f'  <VRTRasterBand dataType="{gdal_dtype}" band="1">\n'
+                f'{nodata_xml}'
+                f'    <SimpleSource>\n'
+                f'      <SourceFilename relativeToVRT="0">{src_fname}</SourceFilename>\n'
+                f'      <SourceBand>1</SourceBand>\n'
+                f'      <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{length}"/>\n'
+                f'      <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{length}"/>\n'
+                f'    </SimpleSource>\n'
+                f'  </VRTRasterBand>\n'
+                f'</VRTDataset>\n'
+            )
+            vrt_file = vrt_dir / (geom_type + '.vrt')
+            with open(vrt_file, 'w') as f:
+                f.write(vrt_xml)
+
+            # Sanity check: VRT (and the HDF5 subdataset behind it) must be readable
+            ds_check = gdal.Open(str(vrt_file))
+            if ds_check is None:
+                raise RuntimeError(f'GDAL cannot open generated VRT: {vrt_file}')
+            if ds_check.RasterXSize != width or ds_check.RasterYSize != length:
+                raise RuntimeError(f'VRT size mismatch for {vrt_file}')
+            ds_check = None
+
+            extracted[geom_type]['file_list'] = vrt_file
+            extracted[geom_type]['nodata'] = nodata
+
+    return extracted
+
+
+def merge_geometry_files(
+    burst_ids: List[str],
+    geom_dir: Path,
+    output_dir: Path,
+    geom_types: List[str],
+    ref_int_file: Optional[str] = None,
+    keep_temp: bool = False
+) -> Dict[str, Path]:
+    """Merge geometry files across multiple burst IDs and compute incidence angle.
+
+    Parameters
+    ----------
+    burst_ids : list of str
+        List of burst IDs (subdirectory names).
+    geom_dir : Path
+        Base directory containing burst subdirectories.
+    output_dir : Path
+        Output directory for merged files.
+    geom_types : list of str
+        List of geometry file basenames to merge.
+    ref_int_file : str, optional
+        Path to a reference interferogram GeoTIFF to set output grid.
+    keep_temp : bool
+        If True, keep temporary extracted files.
+
+    Returns
+    -------
+    dict
+        Mapping from geometry type to merged file path.
+
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Temporary directory for per-burst VRT (fast path) or GeoTIFF (legacy path)
+    # files. Created next to the output dir to avoid exhausting the system /tmp.
+    if keep_temp:
+        temp_dir = output_dir / "temp_extracted"
+        temp_dir.mkdir(exist_ok=True)
+    else:
+        temp_dir = Path(tempfile.mkdtemp(prefix='geom_merge_', dir=str(output_dir)))
+
+    def _collect(use_vrt):
+        """Collect per-burst sources (VRT or extracted GeoTIFF) per geometry type."""
+        geometry_files = defaultdict(list)
+        nodata_dict = {}
+        for burst_id in burst_ids:
+            burst_path = geom_dir / burst_id
+            if not burst_path.exists():
+                continue
+            for h5_file in sorted(burst_path.glob("static_layers*.h5")):
+                if use_vrt:
+                    extracted = build_vrt_from_h5(h5_file, temp_dir, geom_types)
+                else:
+                    extracted = extract_h5_geometry(h5_file, temp_dir, geom_types)
+                for gtype, info in extracted.items():
+                    if info['file_list']:
+                        geometry_files[gtype].append(info['file_list'])
+                        if gtype not in nodata_dict and info['nodata'] is not None:
+                            nodata_dict[gtype] = info['nodata']
+        return geometry_files, nodata_dict
+
+    merged = {}
+    try:
+        # Fast path: VRTs referencing HDF5 subdatasets directly, no full-res raster
+        # copy. Fall back to the legacy GeoTIFF extraction on any failure.
+        try:
+            geometry_files, nodata_dict = _collect(use_vrt=True)
+        except Exception as e:
+            print(f'WARNING: fast VRT-based merge failed: {e}')
+            print('         Falling back to legacy per-burst GeoTIFF extraction ...')
+            geometry_files, nodata_dict = _collect(use_vrt=False)
+
+        if not any(geometry_files.values()):
+            print('#' * 60)
+            print('WARNING: no geometry layers extracted from any static_layers*.h5!')
+            print('         Merged geometry files will NOT be (re)generated;')
+            print('         stale files in the output directory may be reused downstream.')
+            print('         Check the "Error processing ..." messages above.')
+            print('#' * 60)
+
+        # Determine output bounds and resolution from reference interferogram if provided
+        bounds, xres, yres, expected_size = None, None, None, None
+        if ref_int_file and os.path.exists(ref_int_file):
+            ds = gdal.Open(str(ref_int_file))
+            if ds is None:
+                raise RuntimeError(f'cannot open reference interferogram: {ref_int_file}')
+            gt = ds.GetGeoTransform()
+            if gt is None:
+                raise RuntimeError(f'reference interferogram has no geotransform: {ref_int_file}')
+            xmin = gt[0]
+            ymax = gt[3]
+            xmax = xmin + gt[1] * ds.RasterXSize
+            ymin = ymax + gt[5] * ds.RasterYSize
+            bounds = (xmin, ymin, xmax, ymax)
+            xres, yres = abs(gt[1]), abs(gt[5])
+            expected_size = (ds.RasterXSize, ds.RasterYSize)
+            ds = None
+
+        # Merge each geometry type using gdal.Warp (python API, streams block-wise)
+        for gtype, file_list in geometry_files.items():
+            if not file_list:
+                continue
+            out_file = output_dir / gtype
+            if out_file.exists():
+                out_file.unlink()
+
+            print(f"Merging {gtype} from {len(file_list)} bursts using gdal.Warp...")
+            warp_kwargs = dict(
+                format='GTiff',
+                creationOptions=['COMPRESS=LZW'],
+                resampleAlg='near',
+                multithread=True,
+                warpOptions=['NUM_THREADS=ALL_CPUS'],
+            )
+            if bounds is not None:
+                warp_kwargs.update(outputBounds=bounds, xRes=xres, yRes=yres)
+            nodata = nodata_dict.get(gtype)
+            if nodata is not None:
+                warp_kwargs.update(dstNodata=nodata)
+
+            ds_out = gdal.Warp(str(out_file), [str(f) for f in file_list], **warp_kwargs)
+            if ds_out is None:
+                raise RuntimeError(f'gdal.Warp failed for {gtype} '
+                                   f'(inputs: {[str(f) for f in file_list]})')
+
+            # Validate output grid and report coverage
+            out_size = (ds_out.RasterXSize, ds_out.RasterYSize)
+            if expected_size is not None and out_size != expected_size:
+                raise RuntimeError(f'merged {gtype} size {out_size} does not match '
+                                   f'reference interferogram size {expected_size}')
+            arr = ds_out.GetRasterBand(1).ReadAsArray()
+            if nodata is not None and not (isinstance(nodata, float) and np.isnan(nodata)):
+                valid_ratio = float(np.mean(arr != nodata))
+            else:
+                valid_ratio = float(np.mean(np.isfinite(arr)))
+            print(f'    size: {out_size[0]} x {out_size[1]}, valid pixels: {valid_ratio:.1%}')
+            ds_out = None
+            merged[gtype] = out_file
+
+        # Compute incidence angle and azimuth angle if los_east and los_north are present
+        los_east = merged.get('los_east.tif')
+        los_north = merged.get('los_north.tif')
+        if los_east and los_north:
+            inc_file = output_dir / 'incidenceAngle.tif'
+            compute_incidence_angle(
+                los_east, los_north, inc_file,
+                nodata=nodata_dict.get('los_east.tif')
+            )
+            merged['incidenceAngle.tif'] = inc_file
+
+            az_file = output_dir / 'azimuthAngle.tif'
+            compute_azimuth_angle(
+                los_east, los_north, az_file,
+                nodata=nodata_dict.get('los_east.tif')
+            )
+            merged['azimuthAngle.tif'] = az_file
+
+        return merged
+
+    finally:
+        # Always clean up the temporary directory, even when the merge failed.
+        if not keep_temp:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+def _read_los_components(los_east_file: Path, los_north_file: Path):
+    """Read the east/north LOS components and their reference dataset."""
+    ds_east = gdal.Open(str(los_east_file))
+    ds_north = gdal.Open(str(los_north_file))
+    if ds_east is None or ds_north is None:
+        raise RuntimeError(f'cannot open LOS files: {los_east_file}, {los_north_file}')
+    east = ds_east.GetRasterBand(1).ReadAsArray()
+    north = ds_north.GetRasterBand(1).ReadAsArray()
+    if east is None or north is None:
+        raise RuntimeError(f'cannot read LOS bands: {los_east_file}, {los_north_file}')
+    if east.shape != north.shape:
+        raise RuntimeError(f'LOS east/north shape mismatch: {east.shape} vs {north.shape}')
+    ds_north = None
+    return east, north, ds_east
+
+
+def _valid_los_mask(east, north, nodata=None):
+    """Boolean mask of valid LOS pixels (finite and not equal to nodata)."""
+    mask = np.isfinite(east) & np.isfinite(north)
+    if nodata is not None and np.isfinite(nodata):
+        mask &= (east != nodata) & (north != nodata)
+    return mask
+
+
+def _write_angle_geotiff(output_file: Path, angle, template_ds, nodata=None):
+    """Write a float32 angle raster on the grid of the template dataset."""
+    driver = gdal.GetDriverByName('GTiff')
+    ds_out = driver.Create(str(output_file), template_ds.RasterXSize, template_ds.RasterYSize,
+                           1, gdal.GDT_Float32, options=['COMPRESS=LZW'])
+    ds_out.SetGeoTransform(template_ds.GetGeoTransform())
+    ds_out.SetProjection(template_ds.GetProjection())
+    band = ds_out.GetRasterBand(1)
+    band.WriteArray(angle)
+    if nodata is not None:
+        band.SetNoDataValue(nodata)
+    band.FlushCache()
+    ds_out = None
+
+
+def compute_azimuth_angle(los_east_file: Path, los_north_file: Path, output_file: Path, nodata: float = None):
+    """Compute azimuth angle from the LOS east/north components.
+
+    The azimuth angle is measured from the North, anti-clockwise as positive
+    (same convention as the ISCE-2 los.rdr band 2).
+
+    Parameters
+    ----------
+    los_east_file, los_north_file : Path
+        Paths to GeoTIFF files of LOS vector components.
+    output_file : Path
+        Output path for azimuthAngle.tif.
+    nodata : float, optional
+        No-data value; if finite, invalid pixels are set to it explicitly.
+
+    """
+    east, north, ds_east = _read_los_components(los_east_file, los_north_file)
+
+    # azimuth = -arctan2(east, north) * 180/pi (mod 360)
+    az_angle = -1 * np.rad2deg(np.arctan2(east, north)) % 360.0
+
+    if nodata is not None:
+        az_angle[~_valid_los_mask(east, north, nodata)] = nodata
+
+    _write_angle_geotiff(output_file, az_angle, ds_east, nodata)
+    ds_east = None
+
+
+def compute_incidence_angle(los_east_file: Path, los_north_file: Path, output_file: Path, nodata: float = None):
+    """Compute incidence angle from the LOS east/north components.
+
+    Parameters
+    ----------
+    los_east_file, los_north_file : Path
+        Paths to GeoTIFF files of LOS vector components.
+    output_file : Path
+        Output path for incidenceAngle.tif.
+    nodata : float, optional
+        No-data value; if finite, invalid pixels are set to it explicitly.
+
+    """
+    east, north, ds_east = _read_los_components(los_east_file, los_north_file)
+
+    # incidence = arccos(up), where up = sqrt(1 - east^2 - north^2)
+    up_sq = np.clip(1.0 - east**2 - north**2, 0, 1)
+    inc_angle = np.rad2deg(np.arccos(np.sqrt(up_sq)))
+
+    if nodata is not None:
+        inc_angle[~_valid_los_mask(east, north, nodata)] = nodata
+
+    _write_angle_geotiff(output_file, inc_angle, ds_east, nodata)
+    ds_east = None
+
+
+def extract_merge_geometry(
+    geom_dir: str,
+    output_dir: str,
+    geom_types: List[str],
+    ref_int_file: Optional[str] = None,
+    extra_dirs: Optional[List[str]] = None
+) -> Dict[str, Path]:
+    """High-level function to extract, merge, and prepare geometry.
+
+    Parameters
+    ----------
+    geom_dir : str
+        Base geometry directory containing burst subdirs.
+    output_dir : str
+        Output directory.
+    geom_types : list
+        Desired geometry file names.
+    ref_int_file : str, optional
+        Reference interferogram GeoTIFF for extent.
+    extra_dirs : list of str, optional
+        Additional directories containing static_layers*.h5 files
+        (e.g. individual burst dirs from glob expansion).
+
+    Returns
+    -------
+    dict
+        Merged geometry file paths.
+
+    """
+    geom_path = Path(geom_dir)
+    # Find burst IDs (subdirectories containing static_layers*.h5)
+    burst_ids = []
+    for subdir in sorted(geom_path.iterdir()):
+        if subdir.is_dir() and list(subdir.glob("static_layers*.h5")):
+            burst_ids.append(subdir.name)
+    if not burst_ids:
+        if list(geom_path.glob("static_layers*.h5")):
+            burst_ids = ['.']
+
+    # When extra dirs are provided (multi-burst from glob expansion),
+    # build a temporary directory tree with symlinks so that
+    # merge_geometry_files can process all bursts together.
+    base_dir = geom_path
+    temp_base_dir = None
+    if extra_dirs:
+        temp_base_dir = Path(tempfile.mkdtemp(prefix='mintpy_geom_'))
+        new_burst_ids = []
+        for bid in burst_ids:
+            src = (geom_path / bid).resolve()
+            dst_name = f"_m_{bid}".replace('.', 'r') if bid == '.' else f"_m_{bid}"
+            os.symlink(src, temp_base_dir / dst_name, target_is_directory=True)
+            new_burst_ids.append(dst_name)
+        for i, edir in enumerate(extra_dirs):
+            edir_path = Path(edir)
+            if edir_path.is_dir() and list(edir_path.glob("static_layers*.h5")):
+                dst_name = f"_x_{i}"
+                os.symlink(edir_path.resolve(), temp_base_dir / dst_name, target_is_directory=True)
+                new_burst_ids.append(dst_name)
+        burst_ids = new_burst_ids
+        base_dir = temp_base_dir
+
+    if not burst_ids:
+        raise FileNotFoundError(f"No static_layers HDF5 found in {geom_dir}")
+
+    output_path = Path(output_dir)
+    try:
+        merged = merge_geometry_files(
+            burst_ids=burst_ids,
+            geom_dir=base_dir,
+            output_dir=output_path,
+            geom_types=geom_types,
+            ref_int_file=ref_int_file,
+            keep_temp=False
+        )
+    finally:
+        if temp_base_dir:
+            shutil.rmtree(temp_base_dir, ignore_errors=True)
+
+    return merged
+
+###############################################################################
+# XML generation for ISCE3 burst metadata (optional)
+###############################################################################

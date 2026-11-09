@@ -46,10 +46,11 @@ class ifgramStackDict:
         stackObj.write2hdf5(outputFile='ifgramStack.h5', box=(200,500,300,600))
     """
 
-    def __init__(self, name='ifgramStack', pairsDict=None, dsName0=IFGRAM_DSET_NAMES[0]):
+    def __init__(self, name='ifgramStack', pairsDict=None, dsName0=IFGRAM_DSET_NAMES[0], processor=None):
         self.name = name
         self.pairsDict = pairsDict
         self.dsName0 = dsName0        #reference dataset name, unwrapPhase OR azimuthOffset OR rangeOffset
+        self.processor = processor    #processor from the configuration, used for attribute reading
 
     def get_size(self, box=None, xstep=1, ystep=1, geom_obj=None):
         """Get size in 3D"""
@@ -92,7 +93,7 @@ class ifgramStackDict:
     def get_dataset_data_type(self, dsName):
         ifgramObj = [*self.pairsDict.values()][0]
         dsFile = ifgramObj.datasetDict[dsName]
-        metadata = readfile.read_attribute(dsFile)
+        metadata = readfile.read_attribute(dsFile, processor=self.processor)
         dataType = DATA_TYPE_DICT[metadata.get('DATA_TYPE', 'float32').lower()]
         return dataType
 
@@ -310,13 +311,13 @@ class ifgramDict:
         data, atr = ifgramObj.read('unwrapPhase')
     """
 
-    def __init__(self, name='ifgram', datasetDict={}, metadata=None):
+    def __init__(self, name='ifgram', datasetDict={}, metadata=None, processor=None):
         self.name = name
         self.datasetDict = datasetDict
 
         self.platform = None
         self.track = None
-        self.processor = None
+        self.processor = processor
         # platform, track and processor can get values from metadat if they exist
         if metadata is not None:
             for key, value in metadata.items():
@@ -343,7 +344,8 @@ class ifgramDict:
                                    datasetName=family,
                                    box=box2read,
                                    xstep=1,
-                                   ystep=1)
+                                   ystep=1,
+                                   processor=self.processor)
 
         # 2. resize
         if resize2shape:
@@ -383,22 +385,22 @@ class ifgramDict:
 
     def get_size(self, family=IFGRAM_DSET_NAMES[0]):
         self.file = self.datasetDict[family]
-        metadata = readfile.read_attribute(self.file)
+        metadata = readfile.read_attribute(self.file, processor=self.processor)
         length = int(metadata['LENGTH'])
         width = int(metadata['WIDTH'])
         return length, width
 
     def get_perp_baseline(self, family=IFGRAM_DSET_NAMES[0]):
         self.file = self.datasetDict[family]
-        metadata = readfile.read_attribute(self.file)
-        self.bperp_top = float(metadata['P_BASELINE_TOP_HDR'])
-        self.bperp_bottom = float(metadata['P_BASELINE_BOTTOM_HDR'])
+        metadata = readfile.read_attribute(self.file, processor=self.processor)
+        self.bperp_top = float(metadata.get('P_BASELINE_TOP_HDR', 0))
+        self.bperp_bottom = float(metadata.get('P_BASELINE_BOTTOM_HDR', 0))
         self.bperp = (self.bperp_top + self.bperp_bottom) / 2.0
         return self.bperp
 
     def get_metadata(self, family=IFGRAM_DSET_NAMES[0]):
         self.file = self.datasetDict[family]
-        self.metadata = readfile.read_attribute(self.file)
+        self.metadata = readfile.read_attribute(self.file, processor=self.processor)
         self.length = int(self.metadata['LENGTH'])
         self.width = int(self.metadata['WIDTH'])
 
@@ -448,7 +450,7 @@ class geometryDict:
         self.dsNames = list(self.datasetDict.keys())
         if not self.extraMetadata:
             dsFile = self.datasetDict[self.dsNames[0]]
-            metadata = readfile.read_attribute(dsFile)
+            metadata = readfile.read_attribute(dsFile, processor=self.processor)
             if all(i in metadata.keys() for i in ['STARTING_RANGE', 'RANGE_PIXEL_SIZE']):
                 self.extraMetadata = metadata
 
@@ -464,7 +466,8 @@ class geometryDict:
                                        datasetName=dsName,
                                        box=box,
                                        xstep=xstep,
-                                       ystep=ystep)
+                                       ystep=ystep,
+                                       processor=self.processor)
         return data, metadata
 
     def get_slant_range_distance(self, box=None, xstep=1, ystep=1):
@@ -482,7 +485,7 @@ class geometryDict:
             if ds_name in self.dsNames:
                 print(f'    geocoded input, use incidenceAngle from file: {os.path.basename(self.datasetDict[ds_name])}')
                 inc_angle = self.read(family=ds_name)[0].astype(np.float32)
-                atr = readfile.read_attribute(self.file)
+                atr = readfile.read_attribute(self.file, processor=self.processor)
                 if atr.get('PROCESSOR', 'isce') == 'hyp3' and atr.get('UNIT', 'degrees').startswith('rad'):
                     print('    convert incidence angle from Gamma to MintPy convention.')
                     inc_angle[inc_angle == 0] = np.nan              # convert the no-data-value from 0 to nan
@@ -544,7 +547,8 @@ class geometryDict:
         else:
             # read DEM if available for more previse calculation
             if 'height' in self.dsNames:
-                dem = readfile.read(self.datasetDict['height'], datasetName='height')[0]
+                dem = readfile.read(self.datasetDict['height'], datasetName='height',
+                                    processor=self.processor)[0]
             else:
                 dem = None
 
@@ -576,7 +580,7 @@ class geometryDict:
         if not family:
             family = [i for i in self.datasetDict.keys() if i != 'bperp'][0]
         self.file = self.datasetDict[family]
-        metadata = readfile.read_attribute(self.file)
+        metadata = readfile.read_attribute(self.file, processor=self.processor)
 
         # update due to subset
         if box:
@@ -600,13 +604,83 @@ class geometryDict:
         if not family:
             family = [i for i in self.datasetDict.keys() if i != 'bperp'][0]
         self.file = self.datasetDict[family]
-        self.metadata = readfile.read_attribute(self.file)
+        self.metadata = readfile.read_attribute(self.file, processor=self.processor)
         self.length = int(self.metadata['LENGTH'])
         self.width = int(self.metadata['WIDTH'])
         if 'UNIT' in self.metadata.keys():
             self.metadata.pop('UNIT')
 
         return self.metadata
+
+    def _warp_water_mask(self, dsName, target_length, target_width,
+                         box=None, xstep=1, ystep=1):
+        """Reproject the water mask onto the (possibly subset/multilooked) target grid.
+
+        Parameters: dsName          - str, dataset name, e.g. 'waterMask'
+                    target_length   - int, target rows
+                    target_width    - int, target columns
+                    box             - tuple of 4 int, (x0, y0, x1, y1) in full-res pixels
+                    xstep, ystep    - int, multilook steps along range / azimuth
+        Returns:    data            - np.ndarray, (target_length, target_width)
+        """
+        from osgeo import gdal
+
+        src_file = self.datasetDict[dsName]
+        ref_file = self.datasetDict[self.dsNames[0]]
+
+        ref_ds = gdal.Open(ref_file)
+        if ref_ds is None:
+            raise RuntimeError(f'cannot open reference geometry file: {ref_file}')
+        ref_gt = ref_ds.GetGeoTransform()
+        ref_srs = ref_ds.GetProjection()
+        ref_ds = None
+        if ref_gt is None:
+            raise RuntimeError(f'reference geometry file has no geotransform: {ref_file}')
+
+        # account for the subset box and the multilooking steps in the output grid
+        x0 = box[0] if box else 0
+        y0 = box[1] if box else 0
+        xmin = ref_gt[0] + x0 * ref_gt[1]
+        ymax = ref_gt[3] + y0 * ref_gt[5]
+        xmax = xmin + target_width * ref_gt[1] * xstep
+        ymin = ymax + target_length * ref_gt[5] * ystep
+        dx = abs(ref_gt[1] * xstep)
+        dy = abs(ref_gt[5] * ystep)
+
+        src_ds = gdal.Open(src_file)
+        if src_ds is None:
+            raise RuntimeError(f'cannot open source water mask: {src_file}')
+        src_srs = src_ds.GetProjection()
+        src_ds = None
+        if not src_srs:
+            # source file may lack embedded projection (e.g. GeoTIFF
+            # written before PROJ_DATA was set). Assume EPSG:4326.
+            print('    (source water mask has no projection, assuming EPSG:4326)')
+            src_srs = 'EPSG:4326'
+
+        # warp into memory (no temporary file on disk)
+        warp_kwargs = dict(
+            format='MEM',
+            srcSRS=src_srs,
+            dstSRS=ref_srs,
+            outputBounds=(xmin, ymin, xmax, ymax),
+            xRes=dx,
+            yRes=dy,
+            resampleAlg='near',
+        )
+        ds_warp = gdal.Warp('', src_file, **warp_kwargs)
+        if ds_warp is None:
+            raise RuntimeError(f'gdal.Warp failed for water mask: {src_file}')
+        result = ds_warp.GetRasterBand(1).ReadAsArray()
+        ds_warp = None
+
+        # the warped grid must match the target grid; a mismatch means the
+        # box/step handling above is inconsistent, so fail loudly instead of
+        # silently returning a misaligned mask
+        if result.shape != (target_length, target_width):
+            raise RuntimeError(f'warped waterMask size {result.shape} != '
+                               f'target ({target_length}, {target_width})')
+        return result
 
     def write2hdf5(self, outputFile='geometryRadar.h5', access_mode='w', box=None, xstep=1, ystep=1,
                    compression='lzf', extra_metadata=None):
@@ -706,6 +780,13 @@ class geometryDict:
                               'convert to water mask (False/True for water/land).'.format(fname))
 
                     elif dsName == 'waterMask':
+                        # auto-align if source has different resolution/CRS
+                        # (e.g. 1-arcsec global water mask vs 20 m interferogram grid)
+                        if data.shape != (length, width):
+                            print(f'    auto-aligning waterMask: {data.shape} -> ({length}, {width})')
+                            data = self._warp_water_mask(dsName, length, width,
+                                                         box=box, xstep=xstep, ystep=ystep)
+
                         # GMTSAR water/land mask: 1 for land, and nan for water / no data
                         if np.sum(np.isnan(data)) > 0:
                             print('    convert NaN value for waterMask to zero.')
@@ -729,7 +810,7 @@ class geometryDict:
                         # HyP3 (Gamma) angle of the line-of-sight vector (from ground to SAR platform)
                         # incidence angle 'theta' is measured from horizontal in radians
                         # azimuth   angle 'phi'   is measured from the east with anti-clockwise as positivve in radians
-                        atr = readfile.read_attribute(self.file)
+                        atr = readfile.read_attribute(self.file, processor=self.processor)
                         if atr.get('PROCESSOR', 'isce') == 'hyp3' and atr.get('UNIT', 'degrees').startswith('rad'):
 
                             if dsName == 'incidenceAngle':
