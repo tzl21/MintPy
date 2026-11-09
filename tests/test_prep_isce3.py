@@ -8,6 +8,7 @@ import pytest
 from osgeo import gdal, osr
 
 from mintpy.objects.stackDict import geometryDict
+from mintpy.prep_isce3 import add_ifgram_metadata
 from mintpy.utils import isce3_utils, readfile
 
 
@@ -54,6 +55,22 @@ def test_read_baseline_timeseries_isce3_nested_glob(tmp_path):
     # a non-existent dir must NOT crash, just return an empty dict
     assert isce3_utils.read_baseline_timeseries_isce3(
         str(tmp_path / 'nope')) == {}
+
+
+def test_add_ifgram_metadata():
+    meta = add_ifgram_metadata(
+        {'PROCESSOR': 'isce3'},
+        dates=['20210104', '20210110'],
+        baseline_dict={'20210104': [0.0, 0.0], '20210110': [-85.65, -85.65]},
+    )
+    assert meta['DATE12'] == '210104-210110'
+    assert meta['P_BASELINE_TOP_HDR'] == '-85.65'
+    assert meta['P_BASELINE_BOTTOM_HDR'] == '-85.65'
+
+
+#########################################################################
+# burst XML metadata extraction (CENTER_INCIDENCE_ANGLE regression)
+#########################################################################
 
 
 def _write_burst_xml(path, attrs):
@@ -309,6 +326,148 @@ def test_compute_angles_with_finite_nodata(tmp_path):
 #########################################################################
 
 
+def _write_unw_tif(fname):
+    return _write_synthetic_geotiff(fname, shape=(8, 10))
+
+
+def test_prepare_stack_isce3_writes_rsc(tmp_path):
+    from mintpy.prep_isce3 import prepare_stack_isce3
+
+    _write_unw_tif(tmp_path / '20210104_20210110.unw.tif')
+    _write_unw_tif(tmp_path / '20210110_20210116.unw.tif')
+    _write_unw_tif(tmp_path / 'no_dates.unw.tif')
+
+    baseline_dict = {'20210104': [0.0, 0.0], '20210110': [-85.65, -85.65]}
+    prepare_stack_isce3(
+        str(tmp_path / '*.unw.tif'),
+        metadata={'PROCESSOR': 'isce3'},
+        baseline_dict=baseline_dict,
+        update_mode=False,
+    )
+
+    rsc = readfile.read_roipac_rsc(str(tmp_path / '20210104_20210110.unw.tif.rsc'))
+    assert rsc['PROCESSOR'] == 'isce3'
+    assert rsc['DATE12'] == '210104-210110'
+    assert float(rsc['P_BASELINE_TOP_HDR']) == pytest.approx(-85.65)
+    assert not os.path.isfile(str(tmp_path / 'no_dates.unw.tif.rsc'))
+
+
+def test_prepare_stack_isce3_date_pair_from_parent_dir(tmp_path):
+    from mintpy.prep_isce3 import prepare_stack_isce3
+
+    ifg_dir = tmp_path / '20220105_20220117'
+    ifg_dir.mkdir()
+    _write_unw_tif(ifg_dir / 'fullres.unw.tif')
+
+    prepare_stack_isce3(str(ifg_dir / '*.unw.tif'), metadata={'PROCESSOR': 'isce3'}, update_mode=False)
+    rsc = readfile.read_roipac_rsc(str(ifg_dir / 'fullres.unw.tif.rsc'))
+    assert rsc['DATE12'] == '220105-220117'
+
+
+def test_prepare_stack_isce3_empty_pattern():
+    from mintpy.prep_isce3 import prepare_stack_isce3
+
+    with pytest.raises(FileNotFoundError):
+        prepare_stack_isce3('/no/such/dir/*.unw.tif')
+
+
+def _write_static_layers_h5(fname, length=8, width=10, dx=10.0):
+    import h5py
+
+    with h5py.File(fname, 'w') as f:
+        grp = f.create_group('data')
+        grp.create_dataset('x_coordinates', data=np.arange(width) * dx)
+        grp.create_dataset('y_coordinates', data=np.arange(length) * dx)
+        grp.create_dataset('projection', data=np.int32(32605))
+        grp.create_dataset('z', data=np.zeros((length, width), dtype=np.float32))
+        grp.create_dataset('los_east', data=np.zeros((length, width), dtype=np.float32))
+        grp.create_dataset('los_north', data=np.zeros((length, width), dtype=np.float32))
+    return fname
+
+
+def test_prepare_geometry_isce3_writes_rsc(tmp_path, monkeypatch):
+    from mintpy.prep_isce3 import prepare_geometry_isce3
+
+    geom_dir = tmp_path / 'geom' / 't124_264305_iw2'
+    geom_dir.mkdir(parents=True)
+    _write_static_layers_h5(geom_dir / 'static_layers.h5')
+
+    ref_int = _write_unw_tif(tmp_path / 'ref.unw.tif')
+    (tmp_path / 'merged').mkdir()
+    height = _write_synthetic_geotiff(tmp_path / 'merged' / 'height.tif', shape=(8, 10))
+
+    def fake_extract_merge_geometry(**kwargs):
+        return {'height.tif': height}
+
+    monkeypatch.setattr(isce3_utils, 'extract_merge_geometry', fake_extract_merge_geometry)
+
+    metadata = {'PROCESSOR': 'isce3'}
+    metadata = prepare_geometry_isce3(
+        geom_dir=str(tmp_path / 'geom'),
+        out_dir=str(tmp_path / 'merged'),
+        metadata=metadata,
+        update_mode=False,
+        ref_int_file=ref_int,
+    )
+
+    assert os.path.isfile(str(height) + '.rsc')
+    assert metadata['LENGTH'] == '8'
+    assert metadata['WIDTH'] == '10'
+    assert metadata['ALOOKS'] == '1'
+    assert metadata['RLOOKS'] == '1'
+
+
+def test_add_ifgram_metadata_invalid_dates():
+    from mintpy.prep_isce3 import add_ifgram_metadata
+
+    with pytest.raises(ValueError):
+        add_ifgram_metadata({'PROCESSOR': 'isce3'}, dates=['20210104'])
+
+
+#########################################################################
+# cli/prep_isce3.py
+#########################################################################
+
+
+def test_cli_prep_isce3_defaults(tmp_path):
+    from mintpy.cli.prep_isce3 import cmd_line_parse
+
+    geom_dir = tmp_path / 'geom'
+    geom_dir.mkdir()
+    inps = cmd_line_parse(['-g', str(geom_dir)])
+
+    assert inps.out_dir == str(tmp_path / 'merged_geom')
+    assert inps.geom_files == isce3_utils.GEOMETRY_FILENAMES
+    assert inps.update_mode is True
+    assert inps.obs_files is None
+    assert inps.geom_dirs == [str(geom_dir)]
+
+    inps = cmd_line_parse(['-g', str(geom_dir), '--force', '--out-dir', str(tmp_path / 'out')])
+    assert inps.update_mode is False
+    assert inps.out_dir == str(tmp_path / 'out')
+
+
+def test_cli_prep_isce3_geom_glob(tmp_path):
+    from mintpy.cli.prep_isce3 import cmd_line_parse
+
+    for name in ['t124_a', 't124_b']:
+        burst_dir = tmp_path / name / '20210104'
+        burst_dir.mkdir(parents=True)
+        _write_static_layers_h5(burst_dir / 'static_layers.h5')
+
+    inps = cmd_line_parse(['-g', str(tmp_path / 't124*')])
+    assert inps.geom_dir == str(tmp_path / 't124_a')
+    assert len(inps.geom_dirs) == 2
+
+    with pytest.raises(FileNotFoundError):
+        cmd_line_parse(['-g', str(tmp_path / 'nope*')])
+
+
+#########################################################################
+# baseline computation from CSLC and multi-burst baseline reading
+#########################################################################
+
+
 def _write_baseline_pair(dir_path, date1, date2, bperp, bpar=None):
     os.makedirs(str(dir_path), exist_ok=True)
     fname = os.path.join(str(dir_path), f'{date1}_{date2}.txt')
@@ -438,3 +597,50 @@ def test_get_burst_ids_from_geom_dirs(tmp_path):
         geom_dirs = sorted(glob.glob(geom_dir)) if '*' in geom_dir else [geom_dir]
         assert isce3_utils.get_burst_ids_from_geom_dirs(geom_dirs) == [
             't124_264304_iw2', 't124_264305_iw2']
+
+
+def test_prep_isce3_computes_cslc_baselines(tmp_path, monkeypatch):
+    import types
+
+    from mintpy import prep_isce3 as prep_module
+
+    _write_cslc_files(tmp_path, ['t124_264305_iw2'], ['20210104', '20210110'])
+    geom_dir = tmp_path / 'geom' / 't124_264305_iw2'
+    geom_dir.mkdir(parents=True)
+    (geom_dir / 'static_layers.h5').write_text('')
+
+    computed = {}
+    read_kwargs = {}
+
+    def fake_compute(cslc_input, update_mode=True, print_msg=True):
+        computed['input'] = cslc_input
+        return [str(tmp_path / 'CSLC' / 'baselines')]
+
+    def fake_read(baseline_dir, burst_ids=None):
+        read_kwargs['baseline_dir'] = baseline_dir
+        read_kwargs['burst_ids'] = burst_ids
+        return {'20210104': [0.0, 0.0], '20210110': [-12.3, -12.3]}
+
+    monkeypatch.setattr(isce3_utils, 'generate_burst_xml_from_static',
+                        lambda *args, **kwargs: str(tmp_path / 'burst.xml'))
+    monkeypatch.setattr(isce3_utils, 'extract_isce3_metadata',
+                        lambda *args, **kwargs: {'PROCESSOR': 'isce3'})
+    monkeypatch.setattr(isce3_utils, 'compute_baselines_isce3', fake_compute)
+    monkeypatch.setattr(isce3_utils, 'read_baseline_timeseries_isce3', fake_read)
+    monkeypatch.setattr(prep_module, 'prepare_geometry_isce3',
+                        lambda **kwargs: kwargs['metadata'])
+
+    inps = types.SimpleNamespace(
+        meta_file='auto',
+        geom_dir=str(tmp_path / 'geom'),
+        out_dir=str(tmp_path / 'out'),
+        geom_files=isce3_utils.GEOMETRY_FILENAMES,
+        update_mode=False,
+        obs_files=None,
+        baseline_dir=str(tmp_path / 'CSLC' / 't124*' / '2*' / 't124*.h5'),
+        geom_dirs=None,
+    )
+    prep_module.prep_isce3(inps)
+
+    assert 't124*.h5' in computed['input']
+    assert read_kwargs['burst_ids'] == ['t124_264305_iw2']
