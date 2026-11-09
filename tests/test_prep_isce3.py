@@ -246,7 +246,7 @@ def _write_geotiff(fname, data, gt=(500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0),
     return fname
 
 
-def test_warp_water_mask_box_and_multilook(tmp_path):
+def test_warp_to_target_grid_box_and_multilook(tmp_path):
     # reference grid 8 x 10 at 10 m; water mask on the same grid: left half water, right half land
     ref_fname = str(tmp_path / 'ref.tif')
     _write_synthetic_geotiff(ref_fname, shape=(8, 10))
@@ -262,12 +262,12 @@ def test_warp_water_mask_box_and_multilook(tmp_path):
     )
 
     # box=(x0, y0, x1, y1) = the lower-right land half, at half resolution
-    result = geom_obj._warp_water_mask('waterMask', 4, 5, box=(5, 4, 10, 8), xstep=1, ystep=1)
+    result = geom_obj._warp_to_target_grid('waterMask', 4, 5, box=(5, 4, 10, 8), xstep=1, ystep=1)
     assert result.shape == (4, 5)
     assert np.all(result == 1.0)
 
     # full grid is returned unchanged when no box/step is given
-    result_full = geom_obj._warp_water_mask('waterMask', 8, 10)
+    result_full = geom_obj._warp_to_target_grid('waterMask', 8, 10)
     assert np.all(result_full[:, :5] == 0.0)
     assert np.all(result_full[:, 5:] == 1.0)
 
@@ -404,8 +404,8 @@ def test_prepare_geometry_isce3_writes_rsc(tmp_path, monkeypatch):
     )
 
     assert os.path.isfile(str(height) + '.rsc')
-    assert metadata['LENGTH'] == '8'
-    assert metadata['WIDTH'] == '10'
+    assert int(metadata['LENGTH']) == 8
+    assert int(metadata['WIDTH']) == 10
     assert metadata['ALOOKS'] == '1'
     assert metadata['RLOOKS'] == '1'
 

@@ -1560,10 +1560,12 @@ def read_isce3_geotiff(fname):
     if ndv is not None:
         meta['NO_DATA_VALUE'] = 'nan' if np.isnan(ndv) else str(float(ndv))
 
-    # File type and processor
-    ftype = product_file_type(fname)
-    if ftype:
-        meta['FILE_TYPE'] = ftype
+    # file type, date pair and processor
+    file_type, date12 = _parse_isce3_geotiff_name(fname)
+    if file_type:
+        meta['FILE_TYPE'] = file_type
+    if date12:
+        meta['DATE12'] = date12
     meta['PROCESSOR'] = 'isce3'
 
     ds = None
