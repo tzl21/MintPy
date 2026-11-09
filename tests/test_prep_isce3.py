@@ -56,6 +56,48 @@ def test_read_baseline_timeseries_isce3_nested_glob(tmp_path):
         str(tmp_path / 'nope')) == {}
 
 
+def _write_burst_xml(path, attrs):
+    isce3_utils.save_burst_attributes_to_xml(attrs, str(path))
+    return path
+
+
+def test_extract_isce3_metadata_center_incidence_angle(tmp_path):
+    # realistic S1 IW2 values (Hawaii T124, from an actual dolphin run)
+    attrs = {
+        'prf': 1451.627112193990,
+        'burstStartUTC': '2021-01-04 04:30:18.346686',
+        'burstStopUTC': '2021-01-04 04:30:21.430020',
+        'radarWavelength': 0.05546576,
+        'startingRange': 845516.028030508198,
+        'passDirection': 'Ascending',
+        'polarization': 'VV',
+        'trackNumber': 124,
+        'orbitNumber': 25000,
+        'sensingMid': '2021-01-04 04:30:19.888353',
+        'azimuthTimeInterval': 0.0020555563,
+        'rangePixelSize': 2.329562114715,
+        'swathNumber': 2,
+        'satelliteSpeed': 7597.883725532828,
+        'HEADING': 347.728905505086,
+        'earthRadius': 6346500.407216606,
+        'altitude': 697692.716961,
+    }
+    xml_file = _write_burst_xml(tmp_path / 'IW2.burst.xml', attrs)
+    meta = isce3_utils.extract_isce3_metadata(str(xml_file))
+
+    # the old formula returned exactly ~90 deg; the fixed one must be the
+    # realistic near-range incidence angle (~36 deg for these values)
+    inc = float(meta['CENTER_INCIDENCE_ANGLE'])
+    assert 30.0 < inc < 45.0
+    assert abs(inc - 90.0) > 45.0
+
+    # sanity of a few other keys
+    assert meta['PROCESSOR'] == 'isce3'
+    assert meta['PLATFORM'] == 'sen'
+    assert float(meta['CENTER_LINE_UTC']) == pytest.approx(4 * 3600 + 30 * 60 + 19.888353)
+    assert float(meta['HEIGHT']) == pytest.approx(697692.716961)
+
+
 def test_read_baseline_missing_dir_warns(tmp_path, capsys):
     isce3_utils.read_baseline_timeseries_isce3(str(tmp_path / 'empty'))
     assert 'no baseline text files found' in capsys.readouterr().out
