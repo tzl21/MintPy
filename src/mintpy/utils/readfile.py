@@ -1270,20 +1270,13 @@ def read_attribute(fname, datasetName=None, metafile_ext=None):
             # Recognize ISCE3/Dolphin geocoded products by naming pattern.
             # Dolphin may name the files "fullres.unw.tif" with the date pair
             # in the parent directory name (e.g. ifgrams/20220105_20220117/).
-            if (fext in ['.tif', '.tiff']
-                    and (fbase.endswith('.unw') or fbase.endswith('.cor')
-                         or fbase.endswith('.int') or fbase.endswith('.unw.conncomp'))):
-                has_date_pair = bool(re.search(r'\d{8}_\d{8}', fbase))
-                if not has_date_pair:
-                    has_date_pair = bool(
-                        re.search(r'\d{8}_\d{8}', os.path.basename(os.path.dirname(fname))))
-                if has_date_pair:
-                    # geocoded products only: a radar-coordinate GeoTIFF has no
-                    # geotransform and stays PROCESSOR='gdal'
-                    isce3_meta = read_isce3_geotiff(fname)
-                    if isce3_meta is not None:
-                        atr['PROCESSOR'] = 'isce3'
-                        atr.update(isce3_meta)
+            if fext in ['.tif', '.tiff'] and _is_isce3_geotiff(fname):
+                # geocoded products only: a radar-coordinate GeoTIFF has no
+                # geotransform and stays PROCESSOR='gdal'
+                isce3_meta = read_isce3_geotiff(fname)
+                if isce3_meta is not None:
+                    atr['PROCESSOR'] = 'isce3'
+                    atr.update(isce3_meta)
 
         elif fname.endswith('.img') and any(i.endswith('.hdr') for i in metafiles):
             atr['PROCESSOR'] = 'snap'
@@ -1457,6 +1450,31 @@ def product_file_type(fname):
     return None
 
 
+def _parse_isce3_geotiff_name(fname):
+    """Return (FILE_TYPE, DATE12) parsed from an ISCE3/Dolphin GeoTIFF name.
+
+    Dolphin may put the date pair in the file name (YYYYMMDD_YYYYMMDD.unw.tif)
+    or in the parent directory name (ifgrams/YYYYMMDD_YYYYMMDD/fullres.unw.tif).
+    The FILE_TYPE comes from product_file_type(), the single naming table.
+    """
+    file_type = product_file_type(fname)
+
+    date12 = None
+    match = re.search(r'(\d{8})_(\d{8})', fname)
+    if not match:
+        match = re.search(r'(\d{8})_(\d{8})', os.path.basename(os.path.dirname(fname)))
+    if match:
+        date12 = f'{match.group(1)[2:]}-{match.group(2)[2:]}'
+
+    return file_type, date12
+
+
+def _is_isce3_geotiff(fname):
+    """Check if a GeoTIFF is an ISCE3/Dolphin product, by name pattern."""
+    file_type, date12 = _parse_isce3_geotiff_name(fname)
+    return file_type is not None and date12 is not None
+
+
 def _get_geotransform(ds):
     """Return the geotransform of a GDAL dataset, or None when not georeferenced.
 
@@ -1526,28 +1544,20 @@ def read_isce3_geotiff(fname):
     band = ds.GetRasterBand(1)
     data_type = DATA_TYPE_GDAL2NUMPY.get(band.DataType)
     if data_type:
-        meta['DATA_TYPE'] = data_type.replace('>', '').replace('<', '')
+        meta['DATA_TYPE'] = data_type
 
     # No-data value (skip when the band has none, instead of writing 'None')
     ndv = band.GetNoDataValue()
     if ndv is not None:
         meta['NO_DATA_VALUE'] = 'nan' if np.isnan(ndv) else str(float(ndv))
 
-    # File type and processor
-    ftype = product_file_type(fname)
-    if ftype:
-        meta['FILE_TYPE'] = ftype
+    # file type, date pair and processor
+    file_type, date12 = _parse_isce3_geotiff_name(fname)
+    if file_type:
+        meta['FILE_TYPE'] = file_type
+    if date12:
+        meta['DATE12'] = date12
     meta['PROCESSOR'] = 'isce3'
-
-    # Extract DATE12 from the file name (or its parent directory, e.g. Dolphin
-    # "ifgrams/20220105_20220117/fullres.unw.tif")
-    # Pattern: YYYYMMDD_YYYYMMDD.int.tif
-    match = re.search(r'(\d{8})_(\d{8})', fname)
-    if not match:
-        match = re.search(r'(\d{8})_(\d{8})', os.path.basename(os.path.dirname(fname)))
-    if match:
-        d1, d2 = match.groups()
-        meta['DATE12'] = f"{d1[2:]}-{d2[2:]}"
 
     ds = None
     return meta
