@@ -391,8 +391,8 @@ class ifgramDict:
     def get_perp_baseline(self, family=IFGRAM_DSET_NAMES[0]):
         self.file = self.datasetDict[family]
         metadata = readfile.read_attribute(self.file)
-        self.bperp_top = float(metadata['P_BASELINE_TOP_HDR'])
-        self.bperp_bottom = float(metadata['P_BASELINE_BOTTOM_HDR'])
+        self.bperp_top = float(metadata.get('P_BASELINE_TOP_HDR', 0))
+        self.bperp_bottom = float(metadata.get('P_BASELINE_BOTTOM_HDR', 0))
         self.bperp = (self.bperp_top + self.bperp_bottom) / 2.0
         return self.bperp
 
@@ -608,6 +608,76 @@ class geometryDict:
 
         return self.metadata
 
+    def _warp_water_mask(self, dsName, target_length, target_width,
+                         box=None, xstep=1, ystep=1):
+        """Reproject the water mask onto the (possibly subset/multilooked) target grid.
+
+        Parameters: dsName          - str, dataset name, e.g. 'waterMask'
+                    target_length   - int, target rows
+                    target_width    - int, target columns
+                    box             - tuple of 4 int, (x0, y0, x1, y1) in full-res pixels
+                    xstep, ystep    - int, multilook steps along range / azimuth
+        Returns:    data            - np.ndarray, (target_length, target_width)
+        """
+        from osgeo import gdal
+
+        src_file = self.datasetDict[dsName]
+        ref_file = self.datasetDict[self.dsNames[0]]
+
+        ref_ds = gdal.Open(ref_file)
+        if ref_ds is None:
+            raise RuntimeError(f'cannot open reference geometry file: {ref_file}')
+        ref_gt = ref_ds.GetGeoTransform()
+        ref_srs = ref_ds.GetProjection()
+        ref_ds = None
+        if ref_gt is None:
+            raise RuntimeError(f'reference geometry file has no geotransform: {ref_file}')
+
+        # account for the subset box and the multilooking steps in the output grid
+        x0 = box[0] if box else 0
+        y0 = box[1] if box else 0
+        xmin = ref_gt[0] + x0 * ref_gt[1]
+        ymax = ref_gt[3] + y0 * ref_gt[5]
+        xmax = xmin + target_width * ref_gt[1] * xstep
+        ymin = ymax + target_length * ref_gt[5] * ystep
+        dx = abs(ref_gt[1] * xstep)
+        dy = abs(ref_gt[5] * ystep)
+
+        src_ds = gdal.Open(src_file)
+        if src_ds is None:
+            raise RuntimeError(f'cannot open source water mask: {src_file}')
+        src_srs = src_ds.GetProjection()
+        src_ds = None
+        if not src_srs:
+            # source file may lack embedded projection (e.g. GeoTIFF
+            # written before PROJ_DATA was set). Assume EPSG:4326.
+            print('    (source water mask has no projection, assuming EPSG:4326)')
+            src_srs = 'EPSG:4326'
+
+        # warp into memory (no temporary file on disk)
+        warp_kwargs = dict(
+            format='MEM',
+            srcSRS=src_srs,
+            dstSRS=ref_srs,
+            outputBounds=(xmin, ymin, xmax, ymax),
+            xRes=dx,
+            yRes=dy,
+            resampleAlg='near',
+        )
+        ds_warp = gdal.Warp('', src_file, **warp_kwargs)
+        if ds_warp is None:
+            raise RuntimeError(f'gdal.Warp failed for water mask: {src_file}')
+        result = ds_warp.GetRasterBand(1).ReadAsArray()
+        ds_warp = None
+
+        # the warped grid must match the target grid; a mismatch means the
+        # box/step handling above is inconsistent, so fail loudly instead of
+        # silently returning a misaligned mask
+        if result.shape != (target_length, target_width):
+            raise RuntimeError(f'warped waterMask size {result.shape} != '
+                               f'target ({target_length}, {target_width})')
+        return result
+
     def write2hdf5(self, outputFile='geometryRadar.h5', access_mode='w', box=None, xstep=1, ystep=1,
                    compression='lzf', extra_metadata=None):
         """Save/write to HDF5 file with structure defined in:
@@ -706,6 +776,13 @@ class geometryDict:
                               'convert to water mask (False/True for water/land).'.format(fname))
 
                     elif dsName == 'waterMask':
+                        # auto-align if source has different resolution/CRS
+                        # (e.g. 1-arcsec global water mask vs 20 m interferogram grid)
+                        if data.shape != (length, width):
+                            print(f'    auto-aligning waterMask: {data.shape} -> ({length}, {width})')
+                            data = self._warp_water_mask(dsName, length, width,
+                                                         box=box, xstep=xstep, ystep=ystep)
+
                         # GMTSAR water/land mask: 1 for land, and nan for water / no data
                         if np.sum(np.isnan(data)) > 0:
                             print('    convert NaN value for waterMask to zero.')

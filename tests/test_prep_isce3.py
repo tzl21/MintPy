@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from osgeo import gdal, osr
 
+from mintpy.objects.stackDict import geometryDict
 from mintpy.utils import isce3_utils, readfile
 
 
@@ -137,6 +138,132 @@ def test_read_isce3_geotiff_no_nodata(tmp_path):
 
 #########################################################################
 # water mask auto-align (geometryDict._warp_water_mask)
+#########################################################################
+
+
+def test_warp_water_mask(tmp_path):
+    # reference grid: 10 x 8 pixels at 10 m
+    ref_fname = str(tmp_path / 'ref.tif')
+    _write_synthetic_geotiff(ref_fname, shape=(8, 10))
+
+    # water mask on a coarser grid: 5 x 4 pixels at 20 m, same CRS/extent
+    src_fname = str(tmp_path / 'water_mask.tif')
+    driver = gdal.GetDriverByName('GTiff')
+    ds = driver.Create(src_fname, 5, 4, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform((500000.0, 20.0, 0.0, 4000000.0, 0.0, -20.0))
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(32605)
+    ds.SetProjection(srs.ExportToWkt())
+    band = ds.GetRasterBand(1)
+    mask = np.ones((4, 5), dtype=np.float32)   # 1 = land
+    mask[0, :] = 0.0                            # 0 = water
+    band.WriteArray(mask)
+    ds = None
+
+    geom_obj = geometryDict(
+        processor='isce3',
+        datasetDict={'height': ref_fname, 'waterMask': src_fname},
+        extraMetadata={'dummy': 'x'},
+    )
+    result = geom_obj._warp_water_mask('waterMask', 8, 10)
+    assert result.shape == (8, 10)
+    assert set(np.unique(result)).issubset({0.0, 1.0})
+    # the top row of the source (water) stays water after the warp
+    assert np.all(result[0, :] == 0.0)
+    assert np.all(result[-1, :] == 1.0)
+
+
+#########################################################################
+# geometry merging / angle computation (synthetic data, no real data needed)
+#########################################################################
+
+
+def _write_geotiff(fname, data, gt=(500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0), epsg=32605):
+    driver = gdal.GetDriverByName('GTiff')
+    data = np.asarray(data, dtype=np.float32)
+    ds = driver.Create(str(fname), data.shape[1], data.shape[0], 1, gdal.GDT_Float32)
+    ds.SetGeoTransform(gt)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(epsg)
+    ds.SetProjection(srs.ExportToWkt())
+    band = ds.GetRasterBand(1)
+    band.WriteArray(data)
+    ds = None
+    return fname
+
+
+def test_warp_water_mask_box_and_multilook(tmp_path):
+    # reference grid 8 x 10 at 10 m; water mask on the same grid: left half water, right half land
+    ref_fname = str(tmp_path / 'ref.tif')
+    _write_synthetic_geotiff(ref_fname, shape=(8, 10))
+    mask = np.zeros((8, 10), dtype=np.float32)
+    mask[:, 5:] = 1.0
+    mask_fname = str(tmp_path / 'water_mask.tif')
+    _write_geotiff(mask_fname, mask)
+
+    geom_obj = geometryDict(
+        processor='isce3',
+        datasetDict={'height': ref_fname, 'waterMask': mask_fname},
+        extraMetadata={'dummy': 'x'},
+    )
+
+    # box=(x0, y0, x1, y1) = the lower-right land half, at half resolution
+    result = geom_obj._warp_water_mask('waterMask', 4, 5, box=(5, 4, 10, 8), xstep=1, ystep=1)
+    assert result.shape == (4, 5)
+    assert np.all(result == 1.0)
+
+    # full grid is returned unchanged when no box/step is given
+    result_full = geom_obj._warp_water_mask('waterMask', 8, 10)
+    assert np.all(result_full[:, :5] == 0.0)
+    assert np.all(result_full[:, 5:] == 1.0)
+
+
+def test_build_vrt_from_h5_requires_coordinate_arrays(tmp_path):
+    import h5py
+
+    # missing x/y coordinates
+    h5_file = tmp_path / 'static_layers_missing.h5'
+    with h5py.File(h5_file, 'w') as f:
+        grp = f.create_group('data')
+        grp.create_dataset('los_east', data=np.zeros((2, 2), dtype=np.float32))
+    with pytest.raises(KeyError):
+        isce3_utils.build_vrt_from_h5(h5_file, tmp_path / 'vrt', ['los_east.tif'])
+
+    # degenerate 1-pixel coordinate arrays
+    h5_file = tmp_path / 'static_layers_1px.h5'
+    with h5py.File(h5_file, 'w') as f:
+        grp = f.create_group('data')
+        grp.create_dataset('x_coordinates', data=np.array([0.0], dtype=np.float64))
+        grp.create_dataset('y_coordinates', data=np.array([0.0], dtype=np.float64))
+        grp.create_dataset('los_east', data=np.zeros((1, 1), dtype=np.float32))
+    with pytest.raises(ValueError):
+        isce3_utils.build_vrt_from_h5(h5_file, tmp_path / 'vrt', ['los_east.tif'])
+
+
+def test_compute_angles_with_finite_nodata(tmp_path):
+    nodata = -9999.0
+    east = np.full((4, 5), 0.1, dtype=np.float32)
+    north = np.full((4, 5), 0.2, dtype=np.float32)
+    east[0, :] = nodata
+    north[0, :] = nodata
+    east_file = _write_geotiff(tmp_path / 'los_east.tif', east)
+    north_file = _write_geotiff(tmp_path / 'los_north.tif', north)
+
+    inc_file = tmp_path / 'incidenceAngle.tif'
+    isce3_utils.compute_incidence_angle(east_file, north_file, inc_file, nodata=nodata)
+    inc = gdal.Open(str(inc_file)).ReadAsArray()
+    assert np.all(inc[0, :] == nodata)
+    assert np.all(np.isfinite(inc[1:, :]))
+
+    az_file = tmp_path / 'azimuthAngle.tif'
+    isce3_utils.compute_azimuth_angle(east_file, north_file, az_file, nodata=nodata)
+    az = gdal.Open(str(az_file)).ReadAsArray()
+    assert np.all(az[0, :] == nodata)
+    assert np.all((az[1:, :] >= 0) & (az[1:, :] < 360))
+
+
+#########################################################################
+# prep_isce3.py: RSC generation and geometry preparation
 #########################################################################
 
 
